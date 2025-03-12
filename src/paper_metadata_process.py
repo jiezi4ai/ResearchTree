@@ -91,7 +91,16 @@ def filter_by_condition(
     return s2_paper_metadata_updt
 
 
-def process_paper_metadata(s2_paper_metadata: List[Dict]|Dict):
+def process_paper_metadata(
+        s2_paper_metadata: List[Dict]|Dict,
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        field: Optional[List[str]] = None,  # list of field of study
+        min_citation_cnt: Optional[int] = 0,  # citation count no less than
+        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
+        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
+        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids        
+        ):
     """standardize paper metadata to better suit neo4j format
     Argss:
         s2_paper_metadata ([List[Dict]|Dict]): paper metadata
@@ -110,7 +119,23 @@ def process_paper_metadata(s2_paper_metadata: List[Dict]|Dict):
     """
     if type(s2_paper_metadata) == dict:
         s2_paper_metadata = [s2_paper_metadata]
+    
+    # reset id for paper metadata
+    s2_paper_metadata = reset_id(s2_paper_metadata)
 
+    # filter by conditions
+    s2_paper_metadata = filter_by_condition(
+        s2_paper_metadata,
+        from_dt,
+        to_dt,
+        field,
+        min_citation_cnt,
+        institutions,
+        journals,
+        author_ids
+    )
+
+    # then process to standard json format
     s2_papermeta_json = []
     for item in s2_paper_metadata:
         item = rename_key_in_dict(item, {'url': 's2Url'})
@@ -199,7 +224,16 @@ def process_paper_metadata(s2_paper_metadata: List[Dict]|Dict):
         return s2_papermeta_json
 
 
-def process_author_metadata(s2_author_metadata: List[Dict]|Dict):
+def process_author_metadata(
+        s2_author_metadata: List[Dict]|Dict,
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        field: Optional[List[str]] = None,  # list of field of study
+        min_citation_cnt: Optional[int] = 0,  # citation count no less than
+        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
+        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
+        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+    ):
     """standardize author metadata to better suit neo4j format
     Argss:
         s2_author_metadata ([List[Dict]|Dict]): author metadata
@@ -237,7 +271,16 @@ def process_author_metadata(s2_author_metadata: List[Dict]|Dict):
 
             # process all paper metadata
             if papers_metadata is not None and papers_metadata != []:
-                s2_papermeta_json = process_paper_metadata(papers_metadata)
+                s2_papermeta_json = process_paper_metadata(
+                    papers_metadata,
+                    from_dt,
+                    to_dt,
+                    field,
+                    min_citation_cnt,
+                    institutions,
+                    journals,
+                    author_ids
+                )
                 s2_authormeta_json.extend(s2_papermeta_json)
 
         return s2_authormeta_json
@@ -246,7 +289,15 @@ def process_author_metadata(s2_author_metadata: List[Dict]|Dict):
 def process_citation_metadata(
         original_paper_metadata: Dict,
         s2_citation_metadata: List[Dict]|Dict,
-        type: Literal['citing','cited']):
+        type: Literal['citing','cited'],
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        field: Optional[List[str]] = None,  # list of field of study
+        min_citation_cnt: Optional[int] = 0,  # citation count no less than
+        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
+        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
+        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+        ):
     """standardize paper citation relationships to better suit neo4j format
     Argss:
         s2_citation_metadata ([List[Dict]|Dict]): citing or cited by metadata
@@ -264,11 +315,23 @@ def process_citation_metadata(
                         'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
     """
     s2_citationmeta_json = []
+
     source_paper_id = original_paper_metadata.get('paperId')
     if source_paper_id is not None:
-        s2_papermeta_json = process_paper_metadata(original_paper_metadata)
+        # for original paper
+        s2_papermeta_json = process_paper_metadata(
+            original_paper_metadata,
+            from_dt,
+            to_dt,
+            field,
+            min_citation_cnt,
+            institutions,
+            journals,
+            author_ids
+        )
         s2_citationmeta_json.extend(s2_papermeta_json)
 
+        # for citations (citing or cited papers)
         if type(s2_citation_metadata) == dict:
             s2_citation_metadata = [s2_citation_metadata]
         
@@ -277,7 +340,16 @@ def process_citation_metadata(
                 s2_paper_metadata = item.get('citedPaper')
                 target_paper_id = s2_paper_metadata.get('paperId')
                 if target_paper_id is not None:
-                    s2_papermeta_json = process_paper_metadata(original_paper_metadata)
+                    s2_papermeta_json = process_paper_metadata(
+                        original_paper_metadata,
+                        from_dt,
+                        to_dt,
+                        field,
+                        min_citation_cnt,
+                        institutions,
+                        journals,
+                        author_ids
+                    )
                     s2_citationmeta_json.extend(s2_papermeta_json)
                     start_node_id = source_paper_id
                     end_node_id = s2_papermeta_json[0]['id']
@@ -286,7 +358,16 @@ def process_citation_metadata(
                 s2_paper_metadata = item.get('citingPaper')
                 target_paper_id = s2_paper_metadata.get('paperId')
                 if target_paper_id is not None:
-                    s2_papermeta_json = process_paper_metadata(original_paper_metadata)
+                    s2_papermeta_json = process_paper_metadata(
+                        original_paper_metadata,
+                        from_dt,
+                        to_dt,
+                        field,
+                        min_citation_cnt,
+                        institutions,
+                        journals,
+                        author_ids
+                    )
                     s2_citationmeta_json.extend(s2_papermeta_json)
                     start_node_id = s2_papermeta_json[0]['id']
                     end_node_id = source_paper_id 
@@ -307,7 +388,15 @@ def process_citation_metadata(
 def process_related_metadata(
         original_paper_metadata: Dict,
         s2_related_metadata: List[Dict]|Dict,
-        properties: Dict):
+        properties: Dict,
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        field: Optional[List[str]] = None,  # list of field of study
+        min_citation_cnt: Optional[int] = 0,  # citation count no less than
+        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
+        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
+        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+    ):
     """standardize paper citation relationships to better suit neo4j format
     Argss:
         s2_related_metadata ([List[Dict]|Dict]): related papers metadata
@@ -326,18 +415,37 @@ def process_related_metadata(
                         'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
     """
     s2_relatedmeta_json = []
+    
     source_paper_id = original_paper_metadata.get('paperId')
     if source_paper_id is not None:
-        s2_papermeta_json = process_paper_metadata(original_paper_metadata)
+        # for original paper
+        s2_papermeta_json = process_paper_metadata(
+            original_paper_metadata,
+            from_dt,
+            to_dt,
+            field,
+            min_citation_cnt,
+            institutions,
+            journals,
+            author_ids)
         s2_relatedmeta_json.extend(s2_papermeta_json)
 
+        # for related papers
         if type(s2_related_metadata) == dict:
             s2_related_metadata = [s2_related_metadata]
         
         for item in s2_related_metadata:
             target_paper_id = item.get('paperId')
             if target_paper_id is not None:
-                s2_papermeta_json = process_paper_metadata(original_paper_metadata)
+                s2_papermeta_json = process_paper_metadata(
+                    original_paper_metadata,
+                    from_dt,
+                    to_dt,
+                    field,
+                    min_citation_cnt,
+                    institutions,
+                    journals,
+                    author_ids)
                 s2_relatedmeta_json.extend(s2_papermeta_json)
 
             # append relationship (bidirection)
