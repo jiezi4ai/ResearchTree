@@ -18,9 +18,6 @@ def search_query_gen(domain, input_text, api_key, model_name, temperature=0.6):
     keywords_topics_info = llm_gen_w_retry(api_key, model_name, qa_prompt, sys_prompt=None, temperature=temperature)
     return keywords_topics_info
 
-async def texts_embed_gen(input_texts, api_key, model_name):
-    """generate texts embeddings"""
-    return await gemini_embedding_async(api_key, model_name, input_texts, 10)
 
 def semantic_similarity_gen(vec_x, vec_y):
     similarity_matrix = semantic_similarity_matrix(vec_x, vec_y)

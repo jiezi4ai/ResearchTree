@@ -1,8 +1,16 @@
 import copy 
 import json
 import string
+import hashlib
 from typing import List, Dict, Optional
 from thefuzz import fuzz # pip install thefuzz  https://github.com/seatgeek/thefuzz
+
+def generate_hash_key(input_string):
+  """使用 SHA-256 哈希生成唯一的 key。"""
+  encoded_string = input_string.encode('utf-8')  # 将字符串编码为字节
+  hash_object = hashlib.sha256(encoded_string)
+  hex_dig = hash_object.hexdigest()  # 获取十六进制表示的哈希值
+  return hex_dig
 
 
 # string related opeartions
@@ -17,6 +25,7 @@ def remove_non_text_chars(text, with_digits: Optional[bool]=True):
         if char in valid_chars:
             cleaned_text += char
     return cleaned_text
+
 
 def text_match(text_a, text_b, with_digits: Optional[bool]=True):
     """"fuzzy match between text_a and text_b"""
@@ -51,6 +60,7 @@ def rename_key_in_dict(input_dict, key_mapping):
     """
     return {key_mapping.get(k, k): v for k, v in input_dict.items()}
 
+
 def move_key_to_first(input_dict, key_to_move):
     """move a specific key to the first"""
     if key_to_move not in input_dict:
@@ -63,6 +73,7 @@ def move_key_to_first(input_dict, key_to_move):
             new_dict[k] = v
     return new_dict
 
+
 def filter_and_reorder_dict(input_dict, keys_to_keep):
     """filter and re-order keys of dict"""
     return {key: input_dict[key] for key in keys_to_keep if key in input_dict}
@@ -74,6 +85,7 @@ def remove_key_values(input_dict, keys_to_delete):
         if key in opt_dct:  # 检查键是否存在，避免 KeyError
             del opt_dct[key]
     return opt_dct # 为了方便链式调用，返回修改后的字典
+
 
 def convert_dict_values_to_json(dict_data):
     """检查字典的值，如果值是字典类型，则将其转换为 JSON 字符串。

@@ -1,29 +1,33 @@
 # Code originated from Daniel Silva's project [semanticscholar](https://github.com/danielnsilva/semanticscholar)
-# key updates:
-# 1. align output to dict format
-# 2. add error handler
-# 3. retrieve abstract for papers from reference, from recommendation or from author information 
+# This only serves as a wrapper of some key functions.
 
 import math
 import time
 import random
-from semanticscholar import SemanticScholar  # pip install semanticscholar 
-from typing import List, Dict, Optional
+from typing import List, Dict
+
+import pyalex  # pip install pyalex https://github.com/J535D165/pyalex
+from pyalex import Works, Authors, Sources, Institutions, Topics, Publishers, Funders
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class SemanticScholarKit:
-    def __init__(self, ss_api_key: str = None, ss_api_url: str = None):
+class OpenAlexKit:
+    def __init__(self, email: str = None, openalex_api_key: str = None):
         """
-        :param str ss_api_key: (optional) private API key.
-        :param str ss_api_url: (optional) custom API url.
+        :param str openalex_api_key: (optional) private API key.
         """
-        self.scholar = SemanticScholar(api_key=ss_api_key, api_url=ss_api_url)
-
-
+        if email is not None:  # as a polite rule it would be faster with email as id
+            pyalex.config.email = email  
+        if openalex_api_key is not None:  # not necessary
+            pyalex.config.api_key = openalex_api_key
+        pyalex.config.max_retries = 0
+        pyalex.config.retry_backoff_factor = 0.1
+        pyalex.config.retry_http_codes = [429, 500, 503]
+        
+        
     # get paper information
     def search_paper_by_ids(self, id_list, fields: list = None) -> List[Dict]:
         """search paper by id
@@ -50,9 +54,9 @@ class SemanticScholarKit:
 
         paper_metadata = []
         if id_cnt > 0:
-            batch_cnt = math.ceil(id_cnt / 100)
+            batch_cnt = math.ceil(id_cnt / 500)
             for i in range(batch_cnt):
-                batch_ids = id_list[i*100:(i+1)*100]
+                batch_ids = id_list[i*500:(i+1)*500]
                 try:
                     batch_results = self.scholar.get_papers(paper_ids=batch_ids, fields=fields)
                 except Exception as e:
@@ -64,12 +68,7 @@ class SemanticScholarKit:
         return paper_metadata
 
 
-    def search_author_by_ids(
-            self, 
-            author_ids, 
-            fields: list = None,
-            with_abstract: Optional[bool]=False
-            ):
+    def search_author_by_ids(self, author_ids, fields: list = None):
         """search author by ids
         Args:
             :param str author_ids: list of S2AuthorId (must be <= 1000).
@@ -86,9 +85,9 @@ class SemanticScholarKit:
 
         author_metadata = []
         if id_cnt > 0:
-            batch_cnt = math.ceil(id_cnt / 100)
+            batch_cnt = math.ceil(id_cnt / 500)
             for i in range(batch_cnt):
-                batch_ids = id_list[i*100:(i+1)*100]
+                batch_ids = id_list[i*500:(i+1)*500]
                 try:
                     batch_results = self.scholar.get_authors(author_ids=batch_ids, fields=fields)
                 except Exception as e:
@@ -99,34 +98,6 @@ class SemanticScholarKit:
                     item = item.__dict__.get('_data', {})
                     author_metadata.append(item)
                 time.sleep(random.uniform(10, 15))
-
-        if with_abstract:
-            # filter paper ids with missing abstract
-            tmp_ids = []
-            for info in author_metadata:
-                papers = info.get('papers', [])
-                for paper in papers:
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        tmp_ids.append(paper_id)
-            
-            # search again for paper with missing abstract
-            if len(tmp_ids) > 0:
-                paper_metadata = self.search_paper_by_ids(id_list=tmp_ids, fields=fields)
-            
-            # retrieve abstract and update original information
-            ref_abstracts = {item['paperId']: item['abstract'] for item in paper_metadata 
-                             if item.get('paperId') is not None and item.get('abstract') is not None}
-            
-            for info in author_metadata:
-                papers = info.get('papers', [])
-                for paper in papers:
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        paper['abstract'] = ref_abstracts.get(paper_id)
-
         return author_metadata
 
 
@@ -212,8 +183,7 @@ class SemanticScholarKit:
         self,
         paper_id: str,
         fields: list = None,
-        limit: int = 100,
-        with_abstract: Optional[bool]=False
+        limit: int = 100
     ) -> List[Dict]:
         """Get papers cited by this paper
         Args:
@@ -245,34 +215,6 @@ class SemanticScholarKit:
         refs_metadata = []
         for item in results[0:limit]:
             refs_metadata.append(item.__dict__.get('_data', {}))
-
-        if with_abstract:
-            # filter paper ids with missing abstract
-            tmp_ids = []
-            for info in refs_metadata:
-                paper = info.get('citedPaper')
-                if isinstance(paper, dict):
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        tmp_ids.append(paper_id)
-            
-            # search again for paper with missing abstract
-            if len(tmp_ids) > 0:
-                paper_metadata = self.search_paper_by_ids(id_list=tmp_ids, fields=fields)
-            
-            # retrieve abstract and update original information
-            ref_abstracts = {item['paperId']: item['abstract'] for item in paper_metadata 
-                             if item.get('paperId') is not None and item.get('abstract') is not None}
-            
-            for info in refs_metadata:
-                paper = info.get('citedPaper')
-                if paper is not None:
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        paper['abstract'] = ref_abstracts.get(paper_id)
-
         return refs_metadata
 
         
@@ -281,8 +223,7 @@ class SemanticScholarKit:
         self,  
         paper_id: str,
         fields: list = None,
-        limit: int = 100,
-        with_abstract: Optional[bool]=False
+        limit: int = 100
     ) -> List[Dict]:
         """
         Get all papers citing this paper
@@ -313,34 +254,6 @@ class SemanticScholarKit:
         citedby_metadata = []
         for item in results[0:limit]:
             citedby_metadata.append(item.__dict__.get('_data', {}))
-
-        if with_abstract:
-            # filter paper ids with missing abstract
-            tmp_ids = []
-            for info in citedby_metadata:
-                paper = info.get('citingPaper')
-                if isinstance(paper, dict):
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        tmp_ids.append(paper_id)
-            
-            # search again for paper with missing abstract
-            if len(tmp_ids) > 0:
-                paper_metadata = self.search_paper_by_ids(id_list=tmp_ids, fields=fields)
-            
-            # retrieve abstract and update original information
-            ref_abstracts = {item['paperId']: item['abstract'] for item in paper_metadata 
-                             if item.get('paperId') is not None and item.get('abstract') is not None}
-            
-            for info in citedby_metadata:
-                paper = info.get('citingPaper')
-                if paper is not None:
-                    paper_id = paper.get('paperId')
-                    abstract = paper.get('abstract')
-                    if paper_id is not None and abstract is None:
-                        paper['abstract'] = ref_abstracts.get(paper_id)
-
         return citedby_metadata
 
 
@@ -349,8 +262,7 @@ class SemanticScholarKit:
         positive_paper_ids: List[str],
         negative_paper_ids: List[str] = None,
         fields: list = None,
-        limit: int = 100,
-        with_abstract: Optional[bool]=False
+        limit: int = 100
     ) -> List[Dict]:
         """Get recommended papers for lists of positive and negative examples.
         Args:
@@ -375,28 +287,4 @@ class SemanticScholarKit:
         rec_metadata = []
         for item in results[0:limit]:
             rec_metadata.append(item.__dict__.get('_data', {}))
-
-        if with_abstract:
-            # filter paper ids with missing abstract
-            tmp_ids = []
-            for paper in rec_metadata:
-                paper_id = paper.get('paperId')
-                abstract = paper.get('abstract')
-                if paper_id is not None and abstract is None:
-                    tmp_ids.append(paper_id)
-            
-            # search again for paper with missing abstract
-            if len(tmp_ids) > 0:
-                paper_metadata = self.search_paper_by_ids(id_list=tmp_ids, fields=fields)
-            
-            # retrieve abstract and update original information
-            ref_abstracts = {item['paperId']: item['abstract'] for item in paper_metadata 
-                             if item.get('paperId') is not None and item.get('abstract') is not None}
-            
-            for paper in rec_metadata:
-                paper_id = paper.get('paperId')
-                abstract = paper.get('abstract')
-                if paper_id is not None and abstract is None:
-                    paper['abstract'] = ref_abstracts.get(paper_id)
-
         return rec_metadata
