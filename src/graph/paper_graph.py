@@ -1,5 +1,7 @@
 import networkx as nx
-from typing import List, Dict, Union, List, Set, Tuple, Hashable # 用于类型提示
+import community as community_louvain
+from networkx.algorithms.community import label_propagation_communities
+from typing import List, Dict, Union, List, Set, Tuple, Hashable, Literal, Optional
 
 NodeType = Hashable # 节点类型通常是可哈希的
 
@@ -85,7 +87,92 @@ class PaperGraph:
             self.graph.edges[source_id, target_id][key] = value
 
 
-    def find_wcc_subgraphs_for_nodes(
+    def find_common_paths_between_pairs(self, nodes):
+        """
+        找到用户输入的每两个节点之间的所有简单路径。
+        """
+        graph = self.graph.to_undirected()
+        if not nodes or len(nodes) < 2:
+            return {}
+
+        all_paths = {}
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                source_node = nodes[i]
+                target_node = nodes[j]
+                try:
+                    paths = list(nx.all_simple_paths(graph, source=source_node, target=target_node))
+                    if paths:
+                        all_paths[(source_node, target_node)] = paths
+                    else:
+                        print(f"节点 {source_node} 和 {target_node} 之间没有简单路径。")
+                except nx.NodeNotFound as e:
+                    print(f"节点 {e} 不在图中。")
+                    return None
+        return all_paths
+
+
+    def find_shortest_paths_between_pairs(self, nodes):
+        """
+        找到用户输入的每两个节点之间的最短路径。
+        """
+        graph = self.graph.to_undirected()
+        if not nodes or len(nodes) < 2:
+            return {}
+
+        shortest_paths = {}
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                source_node = nodes[i]
+                target_node = nodes[j]
+                try:
+                    path = nx.shortest_path(graph, source=source_node, target=target_node)
+                    shortest_paths[(source_node, target_node)] = path
+                except nx.NetworkXNoPath:
+                    print(f"节点 {source_node} 和 {target_node} 之间没有路径。")
+                except nx.NodeNotFound as e:
+                    print(f"节点 {e} 不在图中。")
+                    return None
+        return shortest_paths
+
+
+    def find_paths_connecting_all_nodes(self, nodes):
+        """
+        找到连接所有指定节点的最短路径的组合。
+        """
+        graph = self.graph.to_undirected()
+
+        if not nodes or len(nodes) < 2:
+            return
+
+        all_paths = []
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                try:
+                    shortest_path = nx.shortest_path(graph, source=nodes[i], target=nodes[j])
+                    all_paths.append(shortest_path)
+                except nx.NetworkXNoPath:
+                    print(f"节点 {nodes[i]} 和 {nodes[j]} 之间没有路径。")
+                    return None
+
+        # 这里可以进一步处理 all_paths 来合并或分析连接所有节点的路径
+        # 例如，可以提取所有路径中的边，构建一个包含这些边的子图。
+        edges = set()
+        for path in all_paths:
+            for i in range(len(path) - 1):
+                u, v = sorted((path[i], path[i+1])) # 考虑无向图，对节点排序
+                edges.add((u, v))
+
+        connecting_subgraph = nx.Graph(list(edges)) # 创建包含这些边的子图
+        nodes_in_subgraph = set(connecting_subgraph.nodes())
+        if all(node in nodes_in_subgraph for node in nodes):
+            return connecting_subgraph
+        else:
+            print("无法找到直接连接所有指定节点的路径组合。")
+            return None
+
+
+    def find_wcc_subgraphs(
         self,
         target_nodes: Union[NodeType, List[NodeType], Set[NodeType], Tuple[NodeType]]
     ) -> List[nx.MultiDiGraph]:
@@ -138,9 +225,140 @@ class PaperGraph:
                     # target_nodes_set -= component_set
 
         return found_subgraphs
+    
+
+    def detect_louvain_community(
+            self, 
+            subgraph, 
+            community_type: Literal['louvain',  # louvian community detection algorithm
+                                    'lpa',  # label propagation community detection algorithm
+                                    ] = 'louvain'
+            ):
+        graph = subgraph.to_undirected()
+        if community_type == 'Louvain':  # 使用 Louvain 算法发现社群
+            communities = community_louvain.best_partition(graph)
+        elif community_type == 'lpa': # 使用标签传播算法发现社群
+            communities = list(label_propagation_communities(G))
+        return communities
+
+        # # 查找特定节点所属的社群 (需要遍历社群)
+        # specific_nodes = seed_dois
+        # for node in specific_nodes:
+        #     found = False
+        #     for key, value in partition.items():
+        #         if node in key:
+        #             print(f"节点 {node} 属于Louvain发现的社群 {value}: {key}")
+        #             found = True
+        #             break
+        #     if not found:
+        #         print(f"节点 {node} 不在任何已发现的社群中")
 
 
-    def cal_node_significance(self):
+    def cal_node_centrality(
+            self, 
+            subgraph, 
+            type_of_centrality:Optional[Literal['in',  # in degree centrality
+                                                'out',   # out degree centrality
+                                                'between',  # betweenness centrality 
+                                                'closeness'  # closeness centrality
+                                                ]] = 'in'
+            ):
+        """Calculate node centrality and sort in descending order
+        """
+        if type_of_centrality == 'in':  # 计算入度中心性
+            centrality = nx.in_degree_centrality(subgraph)
+        elif type_of_centrality == 'out':  # 计算出度中心性
+            centrality = nx.out_degree_centrality(subgraph)
+        elif type_of_centrality == 'between':  # 计算介数中心性
+            centrality = nx.betweenness_centrality(subgraph)
+        elif type_of_centrality == 'closeness':  # 计算紧密中心性
+            centrality = nx.closeness_centrality(subgraph)
+        
+        sorted_centrality = sorted(centrality.items(), key=lambda item: item[1], reverse=True)
+        return sorted_centrality
+
+
+    def assign_edge_weight_mannually(self, subgraph):
+        for u, v in subgraph.edges():
+            if subgraph.edges[u, v]['relationshipType'] in ['CITES']:  # paper -cites - paper
+                subgraph.edges[u, v]['weight'] = 0.5
+            elif subgraph.edges[u, v]['relationshipType'] in ['DISCUSS']:  # paper - discuss - topic
+                subgraph.edges[u, v]['weight'] = 0.4
+            elif subgraph.edges[u, v]['relationshipType'] in ['WRITES']:  # author - writes - paper
+                subgraph.edges[u, v]['weight'] = 0.3 
+            elif subgraph.edges[u, v]['relationshipType'] in ['WORKS_IN']:  # author -works in - affliation
+                subgraph.edges[u, v]['weight'] = 0.2
+            elif subgraph.edges[u, v]['relationshipType'] in ['PRINTS_ON', 'RELEASES_IN']:  # paper - prints on / relaeses in - journal / veneue
+                subgraph.edges[u, v]['weight'] = 0.1
+        return subgraph
+
+
+    def convert_to_homogeneous_graph(self, subgraph, candit_edges):
+        candit_ref = {(x['startNodeId'], x['endNodeId']):x['properties']['weight'] for x in candit_edges}
+        filtered_nodes, filtered_edges = [], []
+
+        # 过滤 ["Journal"] ["Venue"] ["Affiliation"] 节点
+        for node_id in subgraph.nodes():
+            if subgraph.nodes[node_id]['labels'][0] not in ['Journal', 'Venue', 'Affiliation']:
+                filtered_nodes.append(node_id)
+
+        # 过滤 WORKS_IN, PRINTS_ON, RELEASES_IN等类型的边
+        for u, v in subgraph.edges():
+            if subgraph.edges[u, v]['relationshipType'] not in ['WORKS_IN', 'PRINTS_ON', 'RELEASES_IN']: 
+                filtered_edges.append((u, v))
+        
+        # 处理['Author']节点
+        tmp_ref = []
+        for node_id in subgraph.nodes():
+            if subgraph.nodes[node_id]['labels'][0] in ['Author']:
+                # first get author node id
+                author_id = subgraph.nodes[node_id]['id']
+                # then get all sucessors for author node id
+                author_id_successors = subgraph.successors(author_id) 
+                paper_id_publish_dt_ref = {id:subgraph.nodes[node_id]['publicationDate']
+                    for id in author_id_successors if subgraph.nodes[node_id]['labels'][0] in ['Paper']}
+                for paper_id_1, publish_dt_1 in paper_id_publish_dt_ref.items():
+                    for paper_id_2, publish_dt_2 in paper_id_publish_dt_ref.items():
+                        if paper_id_1 != paper_id_2 and publish_dt_1 <= publish_dt_2:
+                            weight = candit_ref.get((paper_id_1, paper_id_2))
+                            if weight > 0.5:
+                                filtered_edges.append({
+                                    "type": "relationship",
+                                    "relationshipType": "COAUTHOR",
+                                    "startNodeId": paper_id_1,
+                                    "endNodeId": paper_id_2,
+                                    "properties": {'weight': weight}
+                                    })
+
+        # 处理 ['Topic']节点
+        tmp_ref = []
+        for node_id in subgraph.nodes():
+            if subgraph.nodes[node_id]['labels'][0] in ['Topic']:
+                # first get author node id
+                author_id = subgraph.nodes[node_id]['id']
+                # then get all sucessors for author node id
+                author_id_successors = subgraph.successors(author_id) 
+                paper_id_publish_dt_ref = {id:subgraph.nodes[node_id]['publicationDate']
+                    for id in author_id_successors if subgraph.nodes[node_id]['labels'][0] in ['Paper']}
+                for paper_id_1, publish_dt_1 in paper_id_publish_dt_ref.items():
+                    for paper_id_2, publish_dt_2 in paper_id_publish_dt_ref.items():
+                        if paper_id_1 != paper_id_2 and publish_dt_1 <= publish_dt_2:
+                            weight = candit_ref.get((paper_id_1, paper_id_2))
+                            if weight > 0.5:
+                                filtered_edges.append({
+                                    "type": "relationship",
+                                    "relationshipType": "COAUTHOR",
+                                    "startNodeId": paper_id_1,
+                                    "endNodeId": paper_id_2,
+                                    "properties": {'weight': weight}
+                                    })
+                                
+        # 仅保留边的起始和终结都是Papers节点
+        # 仅保留Papers节点
+        # 删除孤立的边和节点
+        pass
+
+    def cal_node_pagerank(self, G, alpha=0.85, personalization=None, max_iter=100, tol=1e-06, nstart=None, weight='weight', dangling=None):
         # networkx.pagerank(G, alpha=0.85, personalization=None, max_iter=100, tol=1e-06, nstart=None, weight='weight', dangling=None)
         """
         计算 NetworkX MultiDiGraph 的 PageRank，不使用内置函数。

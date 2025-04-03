@@ -31,7 +31,7 @@ class PaperSearch:
             embed_model_name: Optional[str] = None,
             from_dt: Optional[str] = None,   
             to_dt: Optional[str] = None,   
-            fields: Optional[List[str]] = None,  
+            fields_of_study: Optional[List[str]] = None,  
             min_citation_cnt: Optional[int] = 0,   
             institutions: Optional[List[str]] = None,
             journals: Optional[List[str]] = None,    
@@ -51,7 +51,7 @@ class PaperSearch:
             embed_model_name (Optional[str]): Name of embedding model. Loaded from config.toml if not provided.
             from_dt (Optional[str]): Filter papers published no earlier than this date (YYYY-MM-DD).
             to_dt (Optional[str]): Filter papers published no later than this date (YYYY-MM-DD).
-            fields (Optional[List[str]]): List of fields of study to filter papers.
+            fields_of_study (Optional[List[str]]): List of fields of study to filter papers.
             min_citation_cnt (Optional[int]): Minimum citation count for papers.
             institutions (Optional[List[str]]): List of institutions to restrict paper search (not implemented).
             journals (Optional[List[str]]): List of journals to restrict paper search (not implemented).
@@ -66,7 +66,7 @@ class PaperSearch:
         # for search result filtering
         self.from_dt = from_dt
         self.to_dt = to_dt
-        self.fields = fields # Consistent naming: self.fields
+        self.fields_of_study = fields_of_study
         self.min_citation_cnt = min_citation_cnt
         self.institutions = institutions
         self.journals = journals
@@ -88,7 +88,7 @@ class PaperSearch:
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study, consistent naming as 'fields' (plural)
+            fields_of_study: Optional[List[str]] = None,  # list of field of study, consistent naming as 'fields' (plural)
     ):
         """
         Retrieve papers based on user's input text (research topic, seed paper titles/DOIs).
@@ -97,29 +97,29 @@ class PaperSearch:
             limit (Optional[int]): Maximum number of papers to retrieve per query. Defaults to 100.
             from_dt (Optional[str]): Filter papers published no earlier than this date (YYYY-MM-DD). Overrides class-level `from_dt` if provided.
             to_dt (Optional[str]): Filter papers published no later than this date (YYYY-MM-DD). Overrides class-level `to_dt` if provided.
-            fields (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
+            fields_of_study (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
         """
         # retrieve paper metadata from s2
         seed_paper_metadata, searched_paper_metadata = [], [] 
-        current_fields = fields if fields is not None else self.fields
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study
         current_from_dt = from_dt if from_dt is not None else self.from_dt 
         current_to_dt = to_dt if to_dt is not None else self.to_dt
 
         if self.seed_paper_dois:
-            s2_paper_metadata = self.s2.search_paper_by_ids(id_list=self.seed_paper_dois, fields=current_fields)
+            s2_paper_metadata = self.s2.search_paper_by_ids(id_list=self.seed_paper_dois)
             seed_paper_metadata.extend(s2_paper_metadata)
             time.sleep(5)
 
         if self.seed_paper_titles and len(self.seed_paper_titles) > 0:
             for title in self.seed_paper_titles:
-                s2_paper_metadata = self.s2.search_paper_by_keywords(query=title, fields=current_fields, limit=limit)
+                s2_paper_metadata = self.s2.search_paper_by_keywords(query=title, fields_of_study=current_fields, limit=limit)
                 if s2_paper_metadata: # Check if s2_paper_metadata is not empty to avoid IndexError
                     seed_paper_metadata.append(s2_paper_metadata[0])
                     searched_paper_metadata.extend(s2_paper_metadata[1:]) 
                     time.sleep(5)
 
         if self.research_topic:
-            s2_paper_metadata = self.s2.search_paper_by_keywords(query=self.research_topic, fields=current_fields, limit=limit)
+            s2_paper_metadata = self.s2.search_paper_by_keywords(query=self.research_topic, fields_of_study=current_fields, limit=limit)
             searched_paper_metadata.extend(s2_paper_metadata) 
             time.sleep(5)
 
@@ -130,7 +130,7 @@ class PaperSearch:
                 s2_paper_metadata=seed_paper_metadata,
                 from_dt=current_from_dt,
                 to_dt=current_to_dt,
-                fields=current_fields)
+                fields_of_study=current_fields)
 
             # iterate processed paper metadata, and store information to nodes_json and edge_json separately
             for item in seed_papermetadata_json:
@@ -149,7 +149,7 @@ class PaperSearch:
                 s2_paper_metadata=searched_paper_metadata, 
                 from_dt=current_from_dt,
                 to_dt=current_to_dt,
-                fields=current_fields)
+                fields_of_study=current_fields)
 
             # iterate processed paper metadata, and store information to nodes_json and edge_json separately
             for item in searched_papermetadata_json:
@@ -167,18 +167,18 @@ class PaperSearch:
             author_ids,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study
+            fields_of_study: Optional[List[str]] = None,  # list of field of study
             ):
         # author_ids = []
         # for item in seed_paper_metadata:
         #     authors = item.get('authors', [])[0:5]
         #     author_ids.extend([x['authorId'] for x in authors if x['authorId']])
-        current_fields = fields if fields is not None else self.fields
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study
         current_from_dt = from_dt if from_dt is not None else self.from_dt 
         current_to_dt = to_dt if to_dt is not None else self.to_dt
 
         # retrieve author metadata from s2
-        authros_info = self.s2.search_author_by_ids(author_ids=author_ids, fields=fields, with_abstract=True)
+        authros_info = self.s2.search_author_by_ids(author_ids=author_ids, with_abstract=True)
         time.sleep(5)
 
         # convert to standard format, be aware the output include nodes and edges
@@ -186,7 +186,7 @@ class PaperSearch:
             s2_author_metadata=authros_info,
             from_dt=current_from_dt,
             to_dt=current_to_dt,
-            fields=current_fields
+            fields_of_study=current_fields
         )
 
         # iterate processed paper metadata, and store information to nodes_json and edge_json separately
@@ -208,7 +208,7 @@ class PaperSearch:
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study
+            fields_of_study: Optional[List[str]] = None,  # list of field of study
     ):
         """
         Get papers cited by the paper with the given DOI.
@@ -221,11 +221,11 @@ class PaperSearch:
             fields (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
         """
         # retrieve cited paper metadata from s2
-        current_fields = fields if fields is not None else self.fields 
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study 
         current_from_dt = from_dt if from_dt is not None else self.from_dt 
         current_to_dt = to_dt if to_dt is not None else self.to_dt
 
-        s2_citedpaper_metadata = self.s2.get_s2_cited_papers(paper_doi, fields=current_fields, limit=limit, with_abstract=True)
+        s2_citedpaper_metadata = self.s2.get_s2_cited_papers(paper_doi, limit=limit, with_abstract=True)
         time.sleep(5)
 
         # convert to standard format, be aware the output include nodes and edges
@@ -235,7 +235,7 @@ class PaperSearch:
             citation_type='citedPaper',
             from_dt=current_from_dt,
             to_dt=current_to_dt,
-            fields=current_fields)
+            fields_of_study=current_fields)
 
         # iterate processed paper metadata, and store information to nodes_json and edge_json separately
         for item in s2_citedpapermeta_json:
@@ -254,7 +254,7 @@ class PaperSearch:
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study
+            fields_of_study: Optional[List[str]] = None,  # list of field of study
     ):
         """
         Retrieve papers that cite the paper with the given DOI.
@@ -267,11 +267,11 @@ class PaperSearch:
             fields (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
         """
         # retrieve citing paper metadata from s2
-        current_fields = fields if fields is not None else self.fields 
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study 
         current_from_dt = from_dt if from_dt is not None else self.from_dt 
         current_to_dt = to_dt if to_dt is not None else self.to_dt 
 
-        s2_citingpaper_metadata = self.s2.get_s2_citing_papers(paper_doi, fields=current_fields, limit=limit, with_abstract=True)
+        s2_citingpaper_metadata = self.s2.get_s2_citing_papers(paper_doi, limit=limit, with_abstract=True)
         time.sleep(5)
 
         # convert to standard format, be aware the output include nodes and edges
@@ -281,7 +281,7 @@ class PaperSearch:
             citation_type='citingPaper',
             from_dt=current_from_dt,
             to_dt=current_to_dt,
-            fields=current_fields)
+            fields_of_study=current_fields)
 
         # iterate processed paper metadata, and store information to nodes_json and edge_json separately
         for item in s2_citingpapermetadata_json:
@@ -299,7 +299,7 @@ class PaperSearch:
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study
+            fields_of_study: Optional[List[str]] = None,  # list of field of study
     ):
         """
         Retrieve papers recommended by Semantic Scholar based on a list of paper DOIs.
@@ -309,16 +309,16 @@ class PaperSearch:
             limit (Optional[int]): Maximum number of recommended papers to retrieve. Defaults to 100.
             from_dt (Optional[str]): Filter papers published no earlier than this date (YYYY-MM-DD). Overrides class-level `from_dt` if provided.
             to_dt (Optional[str]): Filter papers published no later than this date (YYYY-MM-DD). Overrides class-level `to_dt` if provided.
-            fields (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
+            fields_of_study (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
         """
         # retrieve recommended paper metadata from s2
-        current_fields = fields if fields is not None else self.fields # Use provided fields if available, otherwise use class-level fields
-        current_from_dt = from_dt if from_dt is not None else self.from_dt # Use provided from_dt if available, otherwise use class-level from_dt
-        current_to_dt = to_dt if to_dt is not None else self.to_dt # Use provided to_dt if available, otherwise use class-level to_dt
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study
+        current_from_dt = from_dt if from_dt is not None else self.from_dt 
+        current_to_dt = to_dt if to_dt is not None else self.to_dt 
 
         if isinstance(paper_dois, str):
             paper_dois = [paper_dois]
-        s2_recommended_metadata = self.s2.get_s2_recommended_papers(positive_paper_ids=paper_dois, fields=current_fields, limit=limit, with_abstract=True)
+        s2_recommended_metadata = self.s2.get_s2_recommended_papers(positive_paper_ids=paper_dois, limit=limit, with_abstract=True)
         time.sleep(5)
 
         # convert to standard format, be aware the output include nodes and edges
@@ -326,7 +326,7 @@ class PaperSearch:
             s2_paper_metadata=s2_recommended_metadata,
             from_dt=current_from_dt,
             to_dt=current_to_dt,
-            fields=current_fields)
+            fields_of_study=current_fields)
 
         # iterate processed paper metadata, and store information to nodes_json and edge_json separately
         for item in s2_recpapermetadata_json:
@@ -403,7 +403,7 @@ class PaperSearch:
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,     # filter publish dt no earlier than
             to_dt: Optional[str] = None,       # filter publish dt no late than
-            fields: Optional[List[str]] = None,  # list of field of study
+            fields_of_study: Optional[List[str]] = None,  # list of field of study
     ):
         """
         Further expand paper scope by leveraging deep search with LLMs to generate related search queries.
@@ -414,10 +414,10 @@ class PaperSearch:
             limit (Optional[int]): Maximum number of papers to retrieve per query. Defaults to 100.
             from_dt (Optional[str]): Filter papers published no earlier than this date (YYYY-MM-DD). Overrides class-level `from_dt` if provided.
             to_dt (Optional[str]): Filter papers published no later than this date (YYYY-MM-DD). Overrides class-level `to_dt` if provided.
-            fields (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
+            fields_of_study (Optional[List[str]]): List of fields of study to filter papers. Overrides class-level `fields` if provided.
         """
         # retrieve related papers using LLM-generated queries
-        current_fields = fields if fields is not None else self.fields 
+        current_fields = fields_of_study if fields_of_study is not None else self.fields_of_study 
         current_from_dt = from_dt if from_dt is not None else self.from_dt 
         current_to_dt = to_dt if to_dt is not None else self.to_dt 
 
@@ -426,7 +426,7 @@ class PaperSearch:
 
         if queries: # Check if queries is not None and not empty list to avoid errors
             for query in queries:
-                s2_paper_metadata = self.s2.search_paper_by_keywords(query, fields=current_fields, limit=limit)
+                s2_paper_metadata = self.s2.search_paper_by_keywords(query, fields_of_study=current_fields, limit=limit)
                 time.sleep(5)
 
                 # convert to standard format, be aware the output include nodes and edges
@@ -434,7 +434,7 @@ class PaperSearch:
                     s2_related_metadata=s2_paper_metadata,
                     from_dt=current_from_dt,
                     to_dt=current_to_dt,
-                    fields=current_fields)
+                    fields_of_study=current_fields)
 
                 # iterate processed paper metadata, and store information to nodes_json and edge_json separately
                 for item in s2_papermeta_json:
@@ -490,7 +490,7 @@ class PaperSearch:
                 publish_dt_j = publish_dt_ref.get(ids[j])
                 sim = sim_matrix[i, j]
                 if i != j:
-                    if publish_dt_i < publish_dt_j:
+                    if publish_dt_i <= publish_dt_j:
                         start_node_id = ids[i]
                         end_node_id = ids[j]
                     else:
@@ -512,9 +512,9 @@ class PaperSearch:
             limit=50, 
             from_dt='2022-01-01', 
             to_dt='2025-03-13',
-            fields=None,
+            fields_of_study=None,
             ):
-        self.initial_paper_query(limit=limit, from_dt=from_dt, to_dt=to_dt, fields=fields)
+        self.initial_paper_query(limit=limit, from_dt=from_dt, to_dt=to_dt, fields_of_study=fields_of_study)
 
     async def collect(
             self, 
@@ -527,7 +527,7 @@ class PaperSearch:
             limit=50, 
             from_dt='2022-01-01', 
             to_dt='2025-03-13',
-            fields=None,):
+            fields_of_study=None,):
         # get seed papers' author information
         if with_author:
             # first get author for seed paper doi
@@ -543,25 +543,25 @@ class PaperSearch:
             # filter author ids with complete information
             author_ids_filtered = list(set(author_ids) - set(complete_author_ids))
             # get author information
-            self.get_author_info(author_ids_filtered, from_dt, to_dt, fields)
+            self.get_author_info(author_ids_filtered, from_dt, to_dt, fields_of_study)
 
         # get citation for seed papers
         for paper_doi in seed_paper_dois:
-            self.get_cited_papers(paper_doi, limit, from_dt, to_dt, fields) 
+            self.get_cited_papers(paper_doi, limit, from_dt, to_dt, fields_of_study) 
             time.sleep(5)
-            self.get_citing_papers(paper_doi, limit, from_dt, to_dt, fields) 
+            self.get_citing_papers(paper_doi, limit, from_dt, to_dt, fields_of_study) 
             time.sleep(5)
 
         # get recommended papers
         if with_recommend:
-            self.get_recommend_papers(seed_paper_dois, limit, from_dt, to_dt, fields)
+            self.get_recommend_papers(seed_paper_dois, limit, from_dt, to_dt, fields_of_study)
 
         # get expanded search by llm detected topics
         if with_expanded_search:
             # first use LLM to generate research topics based on seed papers
             keywords_topics_json = self.llm_gen_related_topics(self, seed_paper_dois)
             # then conduct search for related papers on each research topics 
-            self.get_related_papers(keywords_topics_json, limit, from_dt, to_dt, fields)
+            self.get_related_papers(keywords_topics_json, limit, from_dt, to_dt, fields_of_study)
 
         # add semantic similarity relationship
         if add_semantic_similarity:

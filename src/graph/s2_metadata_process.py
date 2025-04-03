@@ -55,7 +55,7 @@ def filter_by_condition(
     s2_paper_metadata: List[Dict]|Dict,
     from_dt: Optional[str] = None,   # filter publish dt no earlier than
     to_dt: Optional[str] = None,   # filter publish dt no late than
-    field: Optional[List[str]] = None,  # list of field of study
+    fields_of_study: Optional[List[str]] = None,  # list of field of study
     min_citation_cnt: Optional[int] = 0,  # citation count no less than
     institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
     journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
@@ -70,22 +70,21 @@ def filter_by_condition(
         paper_id = item.get('paperId')
         if paper_id is not None:
             publish_dt = item.get('publicationDate')
-        
-        paper_author_ids = [x.get('authorId') for x in item.get('authors') if x.get('authorId') is not None] 
-        paper_fields = item.get('fieldsOfStudy', [])
-        paper_citation_cnt = item.get('referenceCount', 0)
-
-        flag = 1
-        if from_dt and to_dt and (publish_dt < from_dt or publish_dt > to_dt):
-            flag = 0
-        
-        if field and len(set(paper_fields).intersection(set(paper_fields))) == 0:
-            flag = 0
-
-        if min_citation_cnt and paper_citation_cnt < paper_citation_cnt:
-            flag = 0
-        
-        if author_ids and len(set(paper_author_ids).intersection(set(author_ids))) == 0:
+            paper_author_ids = [x.get('authorId') for x in item.get('authors') if x.get('authorId') is not None] 
+            paper_fields = item.get('fieldsOfStudy', [])
+            paper_citation_cnt = item.get('referenceCount', 0)
+            
+            if from_dt and to_dt and (publish_dt < from_dt or publish_dt > to_dt):  # exclude paper out of time scope
+                flag = 0
+            elif fields_of_study and len(set(fields_of_study).intersection(set(paper_fields))) == 0:  # exclude paper not in fields of study
+                flag = 0
+            elif min_citation_cnt and paper_citation_cnt < paper_citation_cnt:   # exclude paper not meeting citation criteria
+                flag = 0
+            elif author_ids and len(set(paper_author_ids).intersection(set(author_ids))) == 0:  # exclude paper not in author list
+                flag = 0
+            else:
+                flag = 1
+        else:
             flag = 0
 
         if flag == 1:
@@ -98,7 +97,7 @@ def process_paper_metadata(
         s2_paper_metadata: List[Dict]|Dict,
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields: Optional[List[str]] = None,  # list of field of study
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
         min_citation_cnt: Optional[int] = 0,  # citation count no less than
         institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
         journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
@@ -131,7 +130,7 @@ def process_paper_metadata(
         s2_paper_metadata,
         from_dt,
         to_dt,
-        fields,
+        fields_of_study,
         min_citation_cnt,
         institutions,
         journals,
@@ -144,9 +143,7 @@ def process_paper_metadata(
         existing_node_ids = [x['id'] for x in s2_papermeta_json if x['type']=='node']
         existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_papermeta_json if x['type']=='relationship']
 
-        item = rename_key_in_dict(item, {'url': 's2Url'})
-        item = rename_key_in_dict(item, {'paperId': 's2PaperId'})
-        s2_paper_id = item.get('s2PaperId')  # semantic scholar paper id
+        s2_paper_id = item.get('paperId')  # semantic scholar paper id
 
         if s2_paper_id is not None:
             paper_id = item.get('id')
@@ -157,14 +154,13 @@ def process_paper_metadata(
             venue_id = venue.get('id') if isinstance(venue, dict) else None
 
             # process paper node
-            if id not in existing_node_ids:
-                paper_node = {
-                    "type": "node",
-                    "id": paper_id,
-                    "labels": ["Paper"],
-                    "properties": item
-                    }
-                s2_papermeta_json.append(paper_node)
+            paper_node = {
+                "type": "node",
+                "id": paper_id,
+                "labels": ["Paper"],
+                "properties": item
+                }
+            s2_papermeta_json.append(paper_node)
 
             for idx, author in enumerate(authors[:10]):
                 # process author node
@@ -241,7 +237,7 @@ def process_author_metadata(
         s2_author_metadata: List[Dict]|Dict,
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields: Optional[List[str]] = None,  # list of field of study
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
         min_citation_cnt: Optional[int] = 0,  # citation count no less than
         institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
         journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
@@ -268,23 +264,18 @@ def process_author_metadata(
 
     s2_authormeta_json = []
     for item in s2_author_metadata:
-        existing_node_ids = [x['id'] for x in s2_papermeta_json if x['type']=='node']
-        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_papermeta_json if x['type']=='relationship']
+        existing_node_ids = [x['id'] for x in s2_authormeta_json if x['type']=='node']
+        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_authormeta_json if x['type']=='relationship']
 
-        item = rename_key_in_dict(item, {'url': 's2Url'})
         author_id = item.get('authorId')
-
         if author_id is not None:
-            papers_metadata = item.get('papers', [])
-
             # process author metadata
-            if author_id not in existing_node_ids:
-                author_node = {
-                            "type": "node",
-                            "id": author_id,
-                            "labels": ["Author"],
-                            "properties": remove_key_values(item, 'papers')}
-                s2_authormeta_json.append(author_node)    
+            author_node = {
+                        "type": "node",
+                        "id": author_id,
+                        "labels": ["Author"],
+                        "properties": remove_key_values(item, ['papers'])}
+            s2_authormeta_json.append(author_node)    
 
             # process institution metadata
             institutions = item.get('affiliations', [])
@@ -306,15 +297,16 @@ def process_author_metadata(
                             "startNodeId": author_id,
                             "endNodeId": inst_hash_id,
                             "properties": {}}
-                        s2_papermeta_json.append(author_inst_relationship)
+                        s2_authormeta_json.append(author_inst_relationship)
 
             # process all paper metadata
+            papers_metadata = item.get('papers', [])
             if papers_metadata is not None and papers_metadata != []:
                 s2_papermeta_json = process_paper_metadata(
                     papers_metadata,
                     from_dt,
                     to_dt,
-                    fields,
+                    fields_of_study,
                     min_citation_cnt,
                     institutions,
                     journals,
@@ -323,7 +315,7 @@ def process_author_metadata(
                 for x in s2_papermeta_json:
                     if x['type'] == "node" and x['id'] not in existing_node_ids:
                         s2_authormeta_json.append(x)
-                    elif item['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
+                    elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
                         s2_authormeta_json.append(x)
     return s2_authormeta_json
 
@@ -334,7 +326,7 @@ def process_citation_metadata(
         citation_type: Literal['citingPaper','citedPaper'],
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields: Optional[List[str]] = None,  # list of field of study
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
         min_citation_cnt: Optional[int] = 0,  # citation count no less than
         institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
         journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
@@ -363,59 +355,45 @@ def process_citation_metadata(
         s2_citation_metadata = [s2_citation_metadata]
     
     for item in s2_citation_metadata:
-        existing_node_ids = [x['id'] for x in s2_papermeta_json if x['type']=='node']
-        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_papermeta_json if x['type']=='relationship']
+        existing_node_ids = [x['id'] for x in s2_citationmeta_json if x['type']=='node']
+        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_citationmeta_json if x['type']=='relationship']
 
-        flag = 0
-        if citation_type == 'citedPaper':  # source paper citing target papers
-            s2_paper_metadata = item.get('citedPaper') 
-            target_paper_id = s2_paper_metadata.get('paperId') if s2_paper_metadata is not None else None
-            if target_paper_id is not None:
-                flag = 1
-                s2_papermeta_json = process_paper_metadata(
-                    s2_paper_metadata,
-                    from_dt,
-                    to_dt,
-                    fields,
-                    min_citation_cnt,
-                    institutions,
-                    journals,
-                    author_ids
-                )
-                for x in s2_papermeta_json:
-                    if x['type'] == "node" and x['id'] not in existing_node_ids:
-                        s2_citationmeta_json.append(x)
-                    elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
-                        s2_citationmeta_json.append(x)
-                start_node_id = original_paper_doi
-                end_node_id = s2_papermeta_json[0]['id']
+        s2_paper_metadata = item.get(citation_type) 
+        target_paper_id = s2_paper_metadata.get('paperId') if s2_paper_metadata is not None else None
+        if target_paper_id is not None:
+            s2_papermeta_json = process_paper_metadata(
+                s2_paper_metadata,
+                from_dt,
+                to_dt,
+                fields_of_study,
+                min_citation_cnt,
+                institutions,
+                journals,
+                author_ids
+            )
+            for x in s2_papermeta_json:
+                if x['type'] == "node" and x['id'] not in existing_node_ids:
+                    s2_citationmeta_json.append(x)
+                elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
+                    s2_citationmeta_json.append(x)
 
-        else:  # source paper cited by target papers
-            s2_paper_metadata = item.get('citingPaper')
-            target_paper_id = s2_paper_metadata.get('paperId') if s2_paper_metadata is not None else None
-            if target_paper_id is not None:
-                flag = 1
-                s2_papermeta_json = process_paper_metadata(
-                    s2_paper_metadata,
-                    from_dt,
-                    to_dt,
-                    fields,
-                    min_citation_cnt,
-                    institutions,
-                    journals,
-                    author_ids
-                )
-                for x in s2_papermeta_json:
-                    if x['type'] == "node" and x['id'] not in existing_node_ids:
-                        s2_citationmeta_json.append(x)
-                    elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
-                        s2_citationmeta_json.append(x)
-                start_node_id = s2_papermeta_json[0]['id']
-                end_node_id = original_paper_doi 
+            target_node_id = None
+            for x in s2_papermeta_json:
+                if x['type']=='node' and x['properties'].get('paperId') == target_paper_id:
+                    target_node_id = x['id']
+                    break
+
+            if target_node_id is not None:
+                if citation_type == 'citedPaper':  # source paper citing target papers
+                    start_node_id = original_paper_doi
+                    end_node_id = target_node_id
+
+                else:  # source paper cited by target papers
+                    start_node_id = target_node_id
+                    end_node_id = original_paper_doi 
 
         # append relationship
-        if flag == 1:
-            if (item['startNodeId'], item['endNodeId']) not in existing_edge_ids:
+            if (start_node_id, end_node_id) not in existing_edge_ids:
                 properties = filter_and_reorder_dict(item, ['isInfluential', 'contexts', 'intents', 'contextsWithIntent'])
                 paper_cites_relationship = {
                     "type": "relationship",
@@ -425,6 +403,8 @@ def process_citation_metadata(
                     "properties": properties}
                 s2_citationmeta_json.append(paper_cites_relationship)
 
+
+
     return s2_citationmeta_json
     
 
@@ -433,7 +413,7 @@ def process_related_metadata(
         topic: Optional[str] = None,
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields: Optional[List[str]] = None,  # list of field of study
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
         min_citation_cnt: Optional[int] = 0,  # citation count no less than
         institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
         journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
@@ -463,8 +443,8 @@ def process_related_metadata(
         s2_related_metadata = [s2_related_metadata]
     
     for item in s2_related_metadata:
-        existing_node_ids = [x['id'] for x in s2_papermeta_json if x['type']=='node']
-        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_papermeta_json if x['type']=='relationship']
+        existing_node_ids = [x['id'] for x in s2_relatedmeta_json if x['type']=='node']
+        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_relatedmeta_json if x['type']=='relationship']
 
         target_paper_id = item.get('paperId')
         if target_paper_id is not None:
@@ -491,7 +471,7 @@ def process_related_metadata(
                 item,
                 from_dt,
                 to_dt,
-                fields,
+                fields_of_study,
                 min_citation_cnt,
                 institutions,
                 journals,
