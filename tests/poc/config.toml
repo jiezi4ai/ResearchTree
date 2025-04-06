@@ -2,9 +2,9 @@
 
 [models]
     [models.llm]
-        api_key = "AIzaSyA918A1op_zZQInAP3nga-DWhOBkTvu9e8"
+        api_key = ""
         model_name = "gemini-2.0-flash"
 
     [models.embed]
-        api_key = "AIzaSyDTOJx6q5KpDkb2ZvqWJbzAOFsWR1SfZjw"
+        api_key = ""
         model_name = "models/text-embedding-004"

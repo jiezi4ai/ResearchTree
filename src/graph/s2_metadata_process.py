@@ -448,25 +448,6 @@ def process_related_metadata(
 
         target_paper_id = item.get('paperId')
         if target_paper_id is not None:
-            if topic:
-                topic_hash_id = generate_hash_key(topic)
-                if topic_hash_id not in existing_node_ids:
-                    topic_node = {
-                        'type': 'node',
-                        'id': topic_hash_id,
-                        'labels': ['Topic'],
-                        'properties': {'topic_hash_id': topic_hash_id, 'topic_name': topic, 'hash_method': 'hashlib.sha256'}}
-                    s2_relatedmeta_json.append(topic_node)
-
-                if (target_paper_id, topic_hash_id) not in existing_edge_ids:
-                    paper_topic_relationship = {
-                        "type": "relationship",
-                        "relationshipType": "DISCUSS",
-                        "startNodeId": target_paper_id,
-                        "endNodeId": topic_hash_id,
-                        "properties": {}}
-                    s2_relatedmeta_json.append(paper_topic_relationship)
-
             s2_papermeta_json = process_paper_metadata(
                 item,
                 from_dt,
@@ -482,6 +463,31 @@ def process_related_metadata(
                     s2_relatedmeta_json.append(x)
                 elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
                     s2_relatedmeta_json.append(x)
+
+            paper_doi = None
+            for x in s2_papermeta_json:
+                if x['type'] == "node" and x['labels'] == ["Paper"]:
+                    paper_doi = x['id']
+                    break
+
+            if topic:
+                topic_hash_id = generate_hash_key(topic)
+                if topic_hash_id not in existing_node_ids:
+                    topic_node = {
+                        'type': 'node',
+                        'id': topic_hash_id,
+                        'labels': ['Topic'],
+                        'properties': {'topic_hash_id': topic_hash_id, 'topic_name': topic, 'hash_method': 'hashlib.sha256'}}
+                    s2_relatedmeta_json.append(topic_node)
+
+                if paper_doi and (paper_doi, topic_hash_id) not in existing_edge_ids:
+                    paper_topic_relationship = {
+                        "type": "relationship",
+                        "relationshipType": "DISCUSS",
+                        "startNodeId": paper_doi,
+                        "endNodeId": topic_hash_id,
+                        "properties": {}}
+                    s2_relatedmeta_json.append(paper_topic_relationship)
 
         # # append relationship (bidirection)
         # paper_cites_relationship = {

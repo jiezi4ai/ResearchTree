@@ -1,5 +1,5 @@
 import networkx as nx
-import community as community_louvain
+import community as community_louvain  # pip install python-louvain  https://github.com/taynaud/python-louvain
 from networkx.algorithms.community import label_propagation_communities
 from typing import List, Dict, Union, List, Set, Tuple, Hashable, Literal, Optional
 

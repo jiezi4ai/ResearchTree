@@ -45,7 +45,7 @@ class PaperSearch:
             from_dt: Optional[str] = None,
             to_dt: Optional[str] = None,
             fields_of_study: Optional[List[str]] = None,
-            min_citation_cnt: Optional[int] = 0,
+            min_citation_cnt: Optional[int] = None,
             institutions: Optional[List[str]] = None,
             journals: Optional[List[str]] = None,
             author_ids: Optional[List[str]] = None,
@@ -660,7 +660,7 @@ class PaperSearch:
             add_semantic_similarity: Optional[bool] = True,
             similarity_threshold: Optional[float] = 0.7,
             limit=50,
-            from_dt='2022-01-01',
+            from_dt=from_dt,
             to_dt='2025-03-13',
             fields_of_study=None,
     ):
@@ -795,34 +795,70 @@ class PaperSearch:
 
 # --- Example Usage ---
 import os
-async def main():
-    llm_api_key = os.getenv('GEMINI_API_KEY_3')
-    llm_model_name="gemini-2.0-flash"
-    embed_api_key = os.getenv('GEMINI_API_KEY_3')
-    embed_model_name="models/text-embedding-004"
-
-    research_topic = "llm literature review"
-    seed_dois = ['10.48550/arXiv.2406.10252',  # AutoSurvey: Large Language Models Can Automatically Write Surveys
-                '10.48550/arXiv.2412.10415',  # Generative Adversarial Reviews: When LLMs Become the Critic
-                '10.48550/arXiv.2402.12928',  # A Literature Review of Literature Reviews in Pattern Analysis and Machine Intelligence 
-                ]
-    seed_titles = ['PaperRobot: Incremental Draft Generation of Scientific Ideas',
-                'From Hypothesis to Publication: A Comprehensive Survey of AI-Driven Research Support Systems'
-                ]
+async def paper_exploration(
+        rounds: int = 2,
+        research_topic: Optional[str]=None,
+        seed_paper_dois: Optional[List[str]]=None,
+        seed_paper_titles: Optional[List[str]]=None,
+        with_reference: Optional[bool]=True,
+        with_author: Optional[bool]=True, # Fetch authors of seed paper
+        with_recommend: Optional[bool]=True,
+        with_expanded_search: Optional[bool]=True, # Set to True to test LLM topic generation
+        add_semantic_similarity: Optional[bool]=True,
+        similarity_threshold: Optional[bool]=0.7,
+        search_limit: Optional[int] = 50,
+        recommend_limit: Optional[int] = 50,
+        citation_limit: Optional[int] = 100,
+        from_dt: Optional[str]="2000-01-01",
+        to_dt: Optional[str]="9999-12-31"
+        ):
     
-    # Example: Initialize with a seed DOI
+    # Initialize with a seed DOI
     searcher = PaperSearch(
         research_topic=research_topic,
-        seed_paper_dois=seed_dois,
-        seed_paper_titles=seed_titles,
+        seed_paper_dois=seed_paper_dois,
+        seed_paper_titles=seed_paper_titles,
         llm_api_key=llm_api_key,
         llm_model_name=llm_model_name,
         embed_api_key=embed_api_key,
         embed_model_name=embed_model_name,
-        s2_request_interval=3.5 # Target avg 3.5s between S2 requests (~0.28/sec)
     )
 
-    # 1. Run initial query to get seed paper info
+    # Round 1. Run initial query to get seed paper info
+    print("--- Running Initial Query ---")
+    await searcher.init_collect(limit=search_limit, from_dt="2015-01-01", to_dt="2025-04-01")
+    print(f"Nodes after init: {len(searcher.nodes_json)}")
+    print(f"Edges after init: {len(searcher.edges_json)}")
+
+    # Get the actual seed DOIs found (in case input was title/topic)
+    # For this example, we know the input DOI, but in general:
+    seed_dois_in_graph = [node['id'] for node in searcher.nodes_json if node['labels'] == ['Paper'] and node['properties'].get('from_seed')]
+    if not seed_dois_in_graph:
+         print("Warning: Seed DOI(s) not found after initial query.")
+         return
+
+    print(f"\n--- Running Main Collection for seed DOIs: {seed_dois_in_graph} ---")
+    start_time = asyncio.get_event_loop().time()
+    await searcher.collect(
+        seed_paper_dois=seed_dois_in_graph, 
+        with_reference=True,
+        with_author=True, # Fetch authors of seed paper
+        with_recommend=True,
+        with_expanded_search=True, 
+        add_semantic_similarity=True,
+        similarity_threshold=0.6,
+        limit=100, 
+        from_dt=from_dt,
+        to_dt=to_dt
+    )
+    end_time = asyncio.get_event_loop().time()
+    print(f"\nOptimized collection took {end_time - start_time:.2f} seconds.")
+    print(f"Final Nodes: {len(searcher.nodes_json)}")
+    print(f"Final Edges: {len(searcher.edges_json)}")
+
+    # Round 2. Run initial query to get seed paper info
+    seed_dois_in_graph
+
     print("--- Running Initial Query ---")
     await searcher.init_collect(limit=50, from_dt="2015-01-01", to_dt="2025-04-01")
     print(f"Nodes after init: {len(searcher.nodes_json)}")
@@ -839,7 +875,7 @@ async def main():
     print(f"\n--- Running Main Collection for seed DOIs: {seed_dois_in_graph} ---")
     start_time = asyncio.get_event_loop().time()
     await searcher.collect(
-        seed_paper_dois=seed_dois_in_graph, # Use DOIs found in the graph
+        seed_paper_dois=seed_dois_in_graph, 
         with_reference=True,
         with_author=True, # Fetch authors of seed paper
         with_recommend=True,
@@ -847,7 +883,7 @@ async def main():
         add_semantic_similarity=True,
         similarity_threshold=0.6,
         limit=100, # Limit number of items per fetch step
-        from_dt="2015-01-01",
+        from_dt="2020-01-01",
         to_dt="2025-04-01"
     )
     end_time = asyncio.get_event_loop().time()
@@ -862,6 +898,22 @@ async def main():
         json.dump(searcher.edges_json, f, indent=2)
 
 if __name__ == "__main__":
+
+    # model setup
+    llm_api_key = os.getenv('GEMINI_API_KEY_3')
+    llm_model_name="gemini-2.0-flash"
+    embed_api_key = os.getenv('GEMINI_API_KEY_3')
+    embed_model_name="models/text-embedding-004"
+
+    # initial seeds
+    research_topic = "llm literature review"
+    seed_dois = ['10.48550/arXiv.2406.10252',  # AutoSurvey: Large Language Models Can Automatically Write Surveys
+                '10.48550/arXiv.2412.10415',  # Generative Adversarial Reviews: When LLMs Become the Critic
+                '10.48550/arXiv.2402.12928',  # A Literature Review of Literature Reviews in Pattern Analysis and Machine Intelligence 
+                ]
+    seed_titles = ['PaperRobot: Incremental Draft Generation of Scientific Ideas',
+                'From Hypothesis to Publication: A Comprehensive Survey of AI-Driven Research Support Systems'
+                ]
     # Make sure to replace API keys before running
     # Configure logging level if needed
     # logging.getLogger().setLevel(logging.DEBUG) # For more verbose output
