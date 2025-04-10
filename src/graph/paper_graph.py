@@ -256,7 +256,7 @@ class PaperGraph:
 
     def cal_node_centrality(
             self, 
-            subgraph, 
+            subgraph = None, 
             type_of_centrality:Optional[Literal['in',  # in degree centrality
                                                 'out',   # out degree centrality
                                                 'between',  # betweenness centrality 
@@ -265,6 +265,7 @@ class PaperGraph:
             ):
         """Calculate node centrality and sort in descending order
         """
+        subgraph = subgraph if subgraph is not None else self.graph
         if type_of_centrality == 'in':  # 计算入度中心性
             centrality = nx.in_degree_centrality(subgraph)
         elif type_of_centrality == 'out':  # 计算出度中心性

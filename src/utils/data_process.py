@@ -78,8 +78,11 @@ def filter_and_reorder_dict(input_dict, keys_to_keep):
     """filter and re-order keys of dict"""
     return {key: input_dict[key] for key in keys_to_keep if key in input_dict}
 
-def remove_key_values(input_dict, keys_to_delete):
+def remove_key_values(input_dict, keys_to_delete:Optional[str|List]):
     """delete key-value in dict"""
+    if isinstance(keys_to_delete, str):
+        keys_to_delete = [keys_to_delete]
+
     opt_dct = copy.deepcopy(input_dict)
     for key in keys_to_delete:
         if key in opt_dct:  # 检查键是否存在，避免 KeyError

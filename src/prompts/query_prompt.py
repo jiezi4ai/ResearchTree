@@ -32,7 +32,8 @@ Hypothetical Output from this Example (Again, illustrative and not to be used in
 ## INSTRUCTIONS
 1. Be precise with keywords and topics, avoid overly broad or generic terms.
 2. Prioritize terms that are most representative and distinctive for the papers.
-3. Only one set of field_of_study, keywords_and_topics, tags, and queries for all the papers from input. Do not output multiple sets.
+3. Each query distincts with each other, which together lead to diversified search to topics related.
+4. Only one set of field_of_study, keywords_and_topics, tags, and queries for all the papers from input. Do not output multiple sets.
 
 ## INPUT
 Now start analyzing the following texts from paper(s).
