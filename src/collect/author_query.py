@@ -63,10 +63,10 @@ class AuthorQuery:
         # Mark nodes appropriately before returning
         for item in s2_author_meta_json:
             if item['type'] == 'node':
-                if item['labels'] == ['Paper'] and item['id'] in author_ids:
+                if item['labels'] == ['Paper']:
                     item['properties']['from_same_author'] = True
                     item['properties']['is_complete'] = True 
-                elif item['labels'] == ['Author']:
+                elif item['labels'] == ['Author'] and item['id'] in author_ids:
                     item['properties']['is_complete'] = True
         return s2_author_meta_json
     
