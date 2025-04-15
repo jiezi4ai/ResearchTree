@@ -546,7 +546,7 @@ class PaperCollector:
         # --- CHECK CROSSREF PAPERS ---
         # get most similar papers to seed papers
         # track citation chain of these papers
-        if if_expanded_citations:
+        if if_expanded_citations is not None:
             print(f"\n--- Get crossref papers: ---")
             non_seed_paper_dois = [node['id'] for node in self.nodes_json 
                                 if node['labels'] == ['Paper'] and 
@@ -587,9 +587,9 @@ class PaperCollector:
                     to_dt=self.to_dt,
                     fields_of_study = self.fields_of_study,
                     )
-                if search_citation in ['reference', 'both']:
+                if if_expanded_citations in ['reference', 'both']:
                     self.explored_nodes['reference'].extend(expanded_paper_dois) 
-                if search_citation in ['citing', 'both']:
+                if if_expanded_citations in ['citing', 'both']:
                     self.explored_nodes['citing'].extend(expanded_paper_dois) 
 
 
@@ -599,9 +599,23 @@ class PaperCollector:
         if if_expanded_authors:
             print(f"\n--- Get most cited authors: ---")
             g = self.pg.graph
-            author_ids = [node_id for node_id in g.nodes if g.nodes[node_id].get('nodeType') == 'Author'] 
-            sorted_items = self.pg.cal_node_centrality(type_of_centrality='out')  # out refers to writes
-            expanded_author_ids = [x[0] for x in sorted_items if x[0] in author_ids and x[0] not in seed_author_ids][0:expanded_l_authors]
+
+            # calculate author with most papers in graph
+            author_stat = []
+            for n in g.nodes:
+                if g.nodes[n].get('nodeType') == 'Author':
+                    out_edges_info = g.out_edges(n, data=True)
+                    write_cnt = sum([1 for u, v, data in out_edges_info if data.get('relationshipType') == 'WRITES'])
+                    author_stat.append((n, write_cnt))
+            
+            # rank order by write in descending order
+            sorted_by_writes = sorted(author_stat, key=lambda item: item[1], reverse=True)
+
+            # exclude seed author (which already being searched)
+            if search_author:
+                expanded_author_ids = [x[0] for x in sorted_by_writes if x[0] not in seed_author_ids][0:expanded_l_authors]
+            else:
+                expanded_author_ids = [x[0] for x in sorted_by_writes][0:expanded_l_authors]
             print(f"Get {len(expanded_author_ids)} authors for further exploration")
 
             # retrieve citation for top l most significant authors
