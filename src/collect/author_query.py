@@ -66,7 +66,9 @@ class AuthorQuery:
                 if item['labels'] == ['Paper']:
                     item['properties']['from_same_author'] = True
                     item['properties']['is_complete'] = True 
-                elif item['labels'] == ['Author'] and item['id'] in author_ids:
+                elif (item['labels'] == ['Author'] and 
+                      item['id'] in author_ids and 
+                      len(set(item['properties'].keys()) - set(['authorId', 'name'])) > 0):
                     item['properties']['is_complete'] = True
         return s2_author_meta_json
     

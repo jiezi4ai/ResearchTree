@@ -12,21 +12,28 @@ def reset_id(s2_paper_metadata: List[Dict]|Dict):
     for item in s2_paper_metadata:
         # set up paper id
         s2_paper_id = item.get('paperId')
-
+        
         if s2_paper_id is not None:
             doi = item.get('externalIds',{}).get('DOI')  # doi
+            arxiv_id = item.get('externalIds',{}).get('ArXiv')  # arxiv id
+
+            if doi is not None and doi.startswith('10.48550/arXiv.') and arxiv_id is None:
+                arxiv_id = doi
+
+            arxiv_id_rvsd = None
+            if arxiv_id is not None:
+                arxiv_no = arxiv_id.replace('10.48550/arXiv.', '')   # get rid of doi prefix
+                arxiv_id_rvsd = re.sub(r'v\d+$', '', arxiv_no)   # get rid of version info
+                version_match = re.search(r'v\d+$', arxiv_no)  # get version info
+                # generate arxiv related info
+                item['version'] = version_match.group(0) if version_match else ""
+                item['arxivUrl'] = f"https://arxiv.org/abs/{arxiv_no}"
+                item['isOpenAccess'] = True
+                item['openAccessPdf'] = f"https://arxiv.org/pdf/{arxiv_no}"
+                item['arxivId'] = arxiv_id_rvsd
+
             if doi is None:
-                arxiv_id = item.get('externalIds',{}).get('ArXiv')  # arxiv id
-                if arxiv_id is not None:
-                    arxiv_no = arxiv_id.replace('10.48550/arXiv.', '')   # get rid of doi prefix
-                    arxiv_id_rvsd = re.sub(r'v\d+$', '', arxiv_no)   # get rid of version info
-                    version_match = re.search(r'v\d+$', arxiv_no)  # get version info
-                    # generate arxiv related info
-                    item['version'] = version_match.group(0) if version_match else ""
-                    item['arxivUrl'] = f"https://arxiv.org/abs/{arxiv_no}"
-                    item['isOpenAccess'] = True
-                    item['openAccessPdf'] = f"https://arxiv.org/pdf/{arxiv_no}"
-                    item['arxivId'] = arxiv_id_rvsd
+                if arxiv_id_rvsd is not None:
                     doi = f"10.48550/arXiv.{arxiv_id_rvsd}"  # assign 10.48550/arXiv. for arxiv id https://info.arxiv.org/help/doi.html
                 else:
                     doi = s2_paper_id
