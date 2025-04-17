@@ -5,9 +5,9 @@ from typing import List, Dict, Union, List, Set, Tuple, Hashable, Literal, Optio
 
 NodeType = Hashable # 节点类型通常是可哈希的
 
-class PaperGraph:
+class PaperGraph(nx.MultiDiGraph):
     def __init__(self, name):
-        self.graph = nx.MultiDiGraph(name=name)
+        super().__init__(name=name)
 
     def add_graph_nodes(self, nodes_json: List[Dict]|Dict):
         """add paper node to graph
@@ -31,7 +31,7 @@ class PaperGraph:
             # be aware that node shall take the form like (1, dict(size=11)) for networkX
             nx_nodes_info.append((id, properties))  
         
-        self.graph.add_nodes_from(nx_nodes_info)
+        self.add_nodes_from(nx_nodes_info)
 
 
     def add_graph_edges(self, edges_json: List[Dict]|Dict):
@@ -58,7 +58,7 @@ class PaperGraph:
             # be aware that relationship shall take the form like (4, 5, dict(route=282)) for networkX
             nx_edges_info.append((source_id, target_id, properties))  
         
-        self.graph.add_edges_from(nx_edges_info)
+        self.add_edges_from(nx_edges_info)
     
 
     def update_node_property(self, node_id, kv_dict):
@@ -67,11 +67,11 @@ class PaperGraph:
             node_id: unique node identifier
             kv_dict: information to update
         """
-        assert node_id in self.graph.nodes
+        assert node_id in self.nodes
 
         for key in kv_dict.keys():
             value = kv_dict[key]
-            self.graph.nodes[node_id][key] = value
+            self.nodes[node_id][key] = value
 
 
     def update_edge_property(self, source_id, target_id, kv_dict):
@@ -80,18 +80,18 @@ class PaperGraph:
             source_id, target_id: unique edge identifier
             kv_dict: information to update
         """
-        assert (source_id, target_id) in self.graph.edges
+        assert (source_id, target_id) in self.edges
 
         for key in kv_dict.keys():
             value = kv_dict[key]
-            self.graph.edges[source_id, target_id][key] = value
+            self.edges[source_id, target_id][key] = value
 
 
     def find_common_paths_between_pairs(self, nodes):
         """
         找到用户输入的每两个节点之间的所有简单路径。
         """
-        graph = self.graph.to_undirected()
+        graph = self.to_undirected()
         if not nodes or len(nodes) < 2:
             return {}
 
@@ -116,7 +116,7 @@ class PaperGraph:
         """
         找到用户输入的每两个节点之间的最短路径。
         """
-        graph = self.graph.to_undirected()
+        graph = self.to_undirected()
         if not nodes or len(nodes) < 2:
             return {}
 
@@ -140,7 +140,7 @@ class PaperGraph:
         """
         找到连接所有指定节点的最短路径的组合。
         """
-        graph = self.graph.to_undirected()
+        graph = self.to_undirected()
 
         if not nodes or len(nodes) < 2:
             return
@@ -193,7 +193,7 @@ class PaperGraph:
             target_nodes_set = {target_nodes}
 
         # 2. 检查所有目标节点是否存在于图中
-        missing_nodes = target_nodes_set - set(self.graph.nodes())
+        missing_nodes = target_nodes_set - set(self.nodes())
         if missing_nodes:
             print(f"警告：以下目标节点不在图中，将被忽略: {missing_nodes}")
             target_nodes_set -= missing_nodes # 移除不存在的节点
@@ -215,7 +215,7 @@ class PaperGraph:
                 component_frozenset = frozenset(component_set)
                 if component_frozenset not in found_components_nodes:
                     # 5. 提取子图并添加到结果列表
-                    subgraph = self.graph.subgraph(component_nodes).copy()
+                    subgraph = self.subgraph(component_nodes).copy()
                     found_subgraphs.append(subgraph)
                     found_components_nodes.add(component_frozenset)
 
@@ -238,7 +238,7 @@ class PaperGraph:
         if community_type == 'Louvain':  # 使用 Louvain 算法发现社群
             communities = community_louvain.best_partition(graph)
         elif community_type == 'lpa': # 使用标签传播算法发现社群
-            communities = list(label_propagation_communities(G))
+            communities = list(label_propagation_communities(graph))
         return communities
 
         # # 查找特定节点所属的社群 (需要遍历社群)

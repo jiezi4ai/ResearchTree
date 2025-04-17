@@ -27,9 +27,9 @@ async def main():
 
 
     pc = PaperCollector(   
-        research_topic = research_topic,   
-        seed_paper_titles = seed_titles, 
-        seed_paper_dois = seed_dois,
+        # research_topic = research_topic,   
+        # seed_paper_titles = seed_titles, 
+        seed_paper_dois = seed_dois[0],
         llm_api_key = llm_api_key,
         llm_model_name = llm_model_name,
         embed_api_key = embed_api_key,
@@ -40,13 +40,13 @@ async def main():
 
 
     await pc.construct_paper_graph(
-        search_citation = 'both',  # 'both',
+        search_citation = None,  # 'both',
         search_author = True,
         find_recommend = True,
-        if_related_topic = True,
-        if_expanded_citations  = 'reference',  #  'reference',
-        if_expanded_authors = True,
-        if_add_similarity = True,
+        if_related_topic = False,
+        if_expanded_citations  = None,  #  'reference',
+        if_expanded_authors = False,
+        if_add_similarity = False,
         similarity_threshold = 0.7,
         expanded_k_papers = 10,
         expanded_l_authors = 50,

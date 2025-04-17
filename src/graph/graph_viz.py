@@ -1,4 +1,5 @@
 # graph_viz.py
+import math
 import networkx as nx
 import pandas as pd
 from collections import Counter
@@ -9,7 +10,7 @@ from bokeh.models import (Scatter, MultiLine, Div, CustomJS, TapTool,
                           HoverTool, LabelSet, ColumnDataSource, Plot, TextInput,
                           GraphRenderer, StaticLayoutProvider, Paragraph)
 from bokeh.layouts import column, row
-from bokeh.palettes import Category10, Pastel1, brewer 
+from bokeh.palettes import Category10, Pastel1, brewer, Set3
 
 # =============================================================================
 # Graph Viz Preprocessing Functions (Keep as they are from previous version)
@@ -17,8 +18,8 @@ from bokeh.palettes import Category10, Pastel1, brewer
 def assign_node_size(
         G,
         sig_nid_lst: Optional[List[str]] = None,
-        min_node_size: Optional[int] = 10,
-        max_node_size: Optional[int] = 50,
+        min_node_size: Optional[int] = 100,
+        max_node_size: Optional[int] = 900,
         ):
     """assign node size (Corrected Logic)"""
     paper_cites_ref, author_writes_ref = {}, {}
@@ -55,11 +56,11 @@ def assign_node_size(
         if node_type == 'Paper' and nid in paper_cites_ref:
             value = paper_cites_ref[nid]
             node_size = min_node_size + ((max_node_size - min_node_size) * (value - min_cites_cnt)) / cites_range
-            node_data['vizSize'] = max(min_node_size, min(max_node_size, node_size))
+            node_data['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
         elif node_type == 'Author' and nid in author_writes_ref:
             value = author_writes_ref[nid]
             node_size = min_node_size + ((max_node_size - min_node_size) * (value - min_writes_cnt)) / writes_range
-            node_data['vizSize'] = max(min_node_size, min(max_node_size, node_size))
+            node_data['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
 
 
 def assign_edge_weight(
@@ -83,7 +84,7 @@ def assign_edge_weight(
 def assign_node_color(
         G,
         sig_nid_lst: Optional[List[str]] = None,
-        default_colormap_name: Optional[str] = 'Category10', # Using Bokeh palette name
+        default_colormap_name: Optional[str] = 'Set3', # Using Bokeh palette name
         default_color_cnt: Optional[int] = 10
         ) -> Dict[str, str]: # Return the color mapping
     """Assign color to node and return the type-to-color mapping."""
@@ -102,8 +103,8 @@ def assign_node_color(
     colors_hex = []
     try:
         # Try getting palette from Bokeh palettes module
-        if default_colormap_name == 'Category10':
-             base_palette = Category10[max(3, default_color_cnt)] # Category10 has 3-10
+        if default_colormap_name == 'Set3':
+             base_palette = Set3[max(3, default_color_cnt)] # Set3 has 3-10
         elif default_colormap_name in brewer:
              # Brewer palettes often need a specific number (e.g., Paired9)
              # Find the largest available size <= default_color_cnt
@@ -112,7 +113,7 @@ def assign_node_color(
              base_palette = brewer[default_colormap_name][max(3, use_size)]
         else:
              # Fallback or other palettes
-             base_palette = Category10[max(3, default_color_cnt)] # Default fallback
+             base_palette = Set3[max(3, default_color_cnt)] # Default fallback
 
         if unique_node_cnt > 0:
              if unique_node_cnt <= len(base_palette):
@@ -122,8 +123,8 @@ def assign_node_color(
 
     except Exception as e: # Catch potential errors like missing palette name
          print(f"Warning: Could not load Bokeh palette '{default_colormap_name}'. Error: {e}. Falling back.")
-         # Fallback logic (e.g., use Category10 or manual list)
-         base_palette = Category10[max(3, default_color_cnt)]
+         # Fallback logic (e.g., use Set3 or manual list)
+         base_palette = Set3[max(3, default_color_cnt)]
          if unique_node_cnt > 0:
              if unique_node_cnt <= len(base_palette):
                  colors_hex = list(base_palette)[:unique_node_cnt]
