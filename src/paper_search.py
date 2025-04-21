@@ -10,12 +10,10 @@ sys.path.append(parent_dir)
 
 from models.embedding_models import gemini_embedding_async, semantic_similarity_matrix
 
-from graph.paper_graph import PaperGraph
 from collect.paper_query import PaperQuery
 from collect.citation_query import CitationQuery
 from collect.author_query import AuthorQuery
 from collect.paper_recommendation import PaperRecommendation
-from collect.related_topic_query import RelatedTopicQuery
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,8 +36,7 @@ class PaperFinder:
             edges_json: Optional[List[Dict]] = None, 
             search_limit: Optional[int] = 50,
             recommend_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100,
-            paper_graph_name: Optional[str] = 'paper_graph'
+            citation_limit: Optional[int] = 100
     ):
         """
         Initialize PaperExploration parameters.
@@ -60,24 +57,20 @@ class PaperFinder:
         self.fields_of_study = fields_of_study
 
         # State: Nodes and Edges
-        self.nodes_json = nodes_json if nodes_json else []
-        self.edges_json = edges_json if edges_json else []
-        # Use a set for faster node/edge existence checks during addition
-        self._node_ids = set()
-        self._edge_tuples = set() # Store (start_id, end_id, type) tuples
+        self.nodes_json = []
+        if isinstance(nodes_json, list) and len(nodes_json) > 0:
+            self._add_items_json(nodes_json)
+            
+        self.edges_json = []
+        if isinstance(edges_json, list) and len(edges_json) > 0:
+            self._add_items_json(edges_json)
 
         # store paper abstraction embeddings
         self.abs_embed_ref = {}
 
-        # paper graph
-        self.pg = PaperGraph(name=paper_graph_name)
-        if len(self.nodes_json) > 0:
-            self.pg.add_graph_nodes(self.nodes_json)
-        if len(self.edges_json) > 0:
-            self.pg.add_graph_edges(self.edges_json)
-
         # explored nodes
-        self.explored_nodes = {'seed':[],  # seed papers
+        self.seeds = {'paper':[], 'author':[]} # seed papers and authors
+        self.explored_nodes = {'topic':[],   # topic explored
                                'author':[],   # authors explored 
                                'reference':[],  # papers with reference explored
                                'citing': []  # papers with citation explored
@@ -87,12 +80,17 @@ class PaperFinder:
     ############################################################################
     # basic function
     ############################################################################
-    def _add_items_to_graph(self, items: List[Dict]):
-        """Adds nodes and relationships from processed data
+    def _add_items_json(
+            self, 
+            items: List[Dict], 
+            round: Optional[int]=1,
+            source: Optional[str]=None):
+        """Adds nodes and relationships from processed data, remove duplications
+        Args:
+            items: node json or edge json
+            round / source: indicating from which iteration the node or edge was created.
+                            round and source help to track the dynamics of the data generation
         """
-        nodes_added, edges_added = 0, 0
-        nodes_to_add, edges_to_add = [], []
-
         _node_ids = set()
         for x in self.nodes_json:
             # for author and paper, avoid duplication if there is complete information
@@ -109,10 +107,8 @@ class PaperFinder:
             if item['type'] == 'node':
                 node_id = item['id']
                 if node_id not in _node_ids:
+                    item['dataGeneration'] = {'round': round, 'source': source}
                     self.nodes_json.append(item)
-                    nodes_added += 1
-                    nodes_to_add.append(item)
-
                     if item['labels'][0] in ['Author', 'Paper']:
                         if item.get('properties', {}).get('is_complete', False) == True:
                             _node_ids.add(item['id'])
@@ -125,13 +121,9 @@ class PaperFinder:
                 end_id = item['endNodeId']
                 edge_tuple = (start_id, end_id, rel_type) 
                 if edge_tuple not in _edge_tuples:
+                    item['dataGeneration'] = {'round': round, 'source': source}
                     self.edges_json.append(item)
                     _edge_tuples.add(edge_tuple)
-                    edges_added += 1
-                    edges_to_add.append(item)
-            
-        self.pg.add_graph_nodes(nodes_to_add)
-        self.pg.add_graph_edges(edges_to_add)
 
  
     ############################################################################
@@ -139,9 +131,10 @@ class PaperFinder:
     ############################################################################
     async def init_search(
             self,
-            research_topic: Optional[List]=None,
+            research_topic: Optional[str]=None,
             seed_paper_titles: Optional[List]=None,
             seed_paper_dois: Optional[List]=None,
+            round: Optional[int] = 1,
             search_limit: Optional[int] = 50,
             from_dt: Optional[str]="2000-01-01",
             to_dt: Optional[str]="9999-12-31"
@@ -157,8 +150,24 @@ class PaperFinder:
             seed_paper_titles=seed_paper_titles,
             seed_paper_dois=seed_paper_dois,
             limit=search_limit, from_dt=from_dt, to_dt=to_dt)
-        self._add_items_to_graph(initial_papers_json)
+        
+        # add item as json
+        self._add_items_json(initial_papers_json, round, source='init_search')
         logging.info(f"Graph state after initial search tasks. Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+
+        # get seed DOIs
+        seed_paper_dois = [node['id'] for node in self.nodes_json if node['labels'] == ['Paper'] and node['properties'].get('from_seed')==True]
+        seed_author_ids = []
+        for node in self.nodes_json:
+            if node['labels'] == ['Paper'] and node['properties'].get('from_seed')==True and isinstance(node['properties'].get('authors'), list):
+                authors_id = [x['authorId'] for x in node['properties']['authors'] if x['authorId'] is not None] 
+                seed_author_ids.extend(authors_id)
+        self.seeds['paper'].extend(seed_paper_dois)
+        self.seeds['author'].extend(seed_author_ids)
+
+        # update explored nodes
+        if research_topic is not None:
+            self.explored_nodes['topic'].extend([research_topic])
 
 
     async def paper_search(
@@ -167,6 +176,7 @@ class PaperFinder:
             seed_author_ids: Optional[List[str]] = None,
             search_citation: Literal['reference', 'citing', 'both'] = None,
             search_author: Optional[bool] = False,
+            round: Optional[int] = 1,
             find_recommend: Optional[bool] = False,
             recommend_limit: Optional[int] = 50,
             citation_limit: Optional[int] = 100,
@@ -229,6 +239,14 @@ class PaperFinder:
             logging.info("No main data collection tasks to run.")
 
         # --- Add all aggregated items to the graph state ---
-        self._add_items_to_graph(processed_items_aggregate)
+        self._add_items_json(processed_items_aggregate, round, source='basic_search')
         logging.info(f"Graph state after collection tasks. Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+        
+        # update explored status
+        if search_citation in ['reference', 'both']:
+            self.explored_nodes['reference'].extend(seed_paper_dois) 
+        if search_citation in ['citing', 'both']:
+            self.explored_nodes['citing'].extend(seed_paper_dois) 
+        if search_author:
+            self.explored_nodes['author'].extend(seed_author_ids) 
 

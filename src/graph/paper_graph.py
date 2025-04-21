@@ -6,7 +6,7 @@ from typing import List, Dict, Union, List, Set, Tuple, Hashable, Literal, Optio
 NodeType = Hashable # 节点类型通常是可哈希的
 
 class PaperGraph(nx.MultiDiGraph):
-    def __init__(self, name):
+    def __init__(self, name:Optional[str]='Paper Graph'):
         super().__init__(name=name)
 
     def add_graph_nodes(self, nodes_json: List[Dict]|Dict):

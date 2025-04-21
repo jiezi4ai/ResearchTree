@@ -1,16 +1,15 @@
 # graph_viz.py
 import math
 import networkx as nx
-import pandas as pd
 from collections import Counter
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
 from bokeh.plotting import figure, show
 from bokeh.models import (Scatter, MultiLine, Div, CustomJS, TapTool,
-                          HoverTool, LabelSet, ColumnDataSource, Plot, TextInput,
-                          GraphRenderer, StaticLayoutProvider, Paragraph)
+                          HoverTool, ColumnDataSource, TextInput,
+                          GraphRenderer, StaticLayoutProvider)
 from bokeh.layouts import column, row
-from bokeh.palettes import Category10, Pastel1, brewer, Set3
+from bokeh.palettes import Pastel1, brewer, Set3
 
 # =============================================================================
 # Graph Viz Preprocessing Functions (Keep as they are from previous version)
@@ -46,21 +45,25 @@ def assign_node_size(
 
     # Second pass: Assign sizes
     for nid, node_data in G.nodes(data=True):
-        node_data['vizSize'] = min_node_size # Default size
+        # initiate graphViz property
+        if 'graphViz' not in node_data.keys():
+            node_data['graphViz'] = {}
+
+        node_data['graphViz']['vizSize'] = 10 # Default size
 
         if sig_nid_lst is not None and nid in sig_nid_lst:
-            node_data['vizSize'] = max_node_size
+            node_data['graphViz']['vizSize'] = max_node_size
             continue
 
         node_type = node_data.get('nodeType')
         if node_type == 'Paper' and nid in paper_cites_ref:
             value = paper_cites_ref[nid]
             node_size = min_node_size + ((max_node_size - min_node_size) * (value - min_cites_cnt)) / cites_range
-            node_data['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
+            node_data['graphViz']['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
         elif node_type == 'Author' and nid in author_writes_ref:
             value = author_writes_ref[nid]
             node_size = min_node_size + ((max_node_size - min_node_size) * (value - min_writes_cnt)) / writes_range
-            node_data['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
+            node_data['graphViz']['vizSize'] = math.ceil(math.sqrt(max(min_node_size, min(max_node_size, node_size))))
 
 
 def assign_edge_weight(
@@ -69,16 +72,20 @@ def assign_edge_weight(
         default_weight: Optional[float] = 0.1
         ):
     """assign edge weight and vizWidth"""
-    for u, v, data in G.edges(data=True):
-        weight = data.get('weight')
+    for u, v, edge_data in G.edges(data=True):
+        weight = edge_data.get('weight')
         if weight is None:
-            rel_type = data.get('relationshipType') # Renamed to avoid conflict
+            rel_type = edge_data.get('relationshipType') # Renamed to avoid conflict
             weight = edge_type_weight_ref.get(rel_type, default_weight) # Use default if type not found
-        data['weight'] = weight # Assign calculated or existing weight back
+        edge_data['weight'] = weight # Assign calculated or existing weight back
+
+        # initiate graphViz property
+        if 'graphViz' not in edge_data.keys():
+            edge_data['graphViz'] = {}
 
         # Ensure vizWidth is always set based on the final weight
         # Scale weight for better visibility if needed, adjust multiplier as necessary
-        data['vizWidth'] = max(0.5, data['weight'] * 5) # Ensure minimum width
+        edge_data['graphViz']['vizWidth'] = max(0.5, edge_data['weight'] * 5) # Ensure minimum width
 
 
 def assign_node_color(
@@ -138,16 +145,20 @@ def assign_node_color(
 
     # Assign colors and border properties to nodes in the graph
     for nid, node_data in G.nodes(data=True):
+        # initiate graphViz property
+        if 'graphViz' not in node_data.keys():
+            node_data['graphViz'] = {}
+
         node_type = node_data.get('nodeType') # Use .get() for safety
         original_color = type_to_color.get(node_type, default_node_color) # Use default if type is None or not mapped
-        node_data['vizColor'] = original_color
+        node_data['graphViz']['vizColor'] = original_color
 
         if sig_nid_lst is not None and nid in sig_nid_lst:
-            node_data['vizBorderColor'] = highlight_border_color
-            node_data['vizBorderWidth'] = highlight_border_width
+            node_data['graphViz']['vizBorderColor'] = highlight_border_color
+            node_data['graphViz']['vizBorderWidth'] = highlight_border_width
         else:
-            node_data['vizBorderColor'] = default_border_color
-            node_data['vizBorderWidth'] = normal_border_width
+            node_data['graphViz']['vizBorderColor'] = default_border_color
+            node_data['graphViz']['vizBorderWidth'] = normal_border_width
 
     return type_to_color # Return the map
 
@@ -195,18 +206,20 @@ def assign_edge_color(
          else:
              colors_hex = list(base_palette) + ['#D3D3D3'] * (unique_edge_cnt - len(base_palette))
 
-
     # Create a mapping from edge type to its assigned color
     type_to_color = dict(zip(unique_edge_types, colors_hex))
     # Add default mapping
     type_to_color['Unknown/Default'] = default_edge_color
 
-
     # Assign colors to edges in the graph
     for u, v, edge_data in G.edges(data=True):
+        # initiate graphViz property
+        if 'graphViz' not in edge_data.keys():
+            edge_data['graphViz'] = {}
+
         edge_type = edge_data.get('relationshipType')
         edge_color = type_to_color.get(edge_type, default_edge_color)
-        edge_data['vizColor'] = edge_color
+        edge_data['graphViz']['vizColor'] = edge_color
 
     return type_to_color # Return the map
 
@@ -217,31 +230,39 @@ def update_node_keys(G, node_key_ref):
         node_type = node_data.get('nodeType')
         label_key = node_key_ref.get(node_type)
 
+        # initiate graphViz property
+        if 'graphViz' not in node_data.keys():
+            node_data['graphViz'] = {}
+
         if label_key and label_key in node_data:
-            node_data['vizLabel'] = node_data.get(label_key, f"ID: {nid}")
+            node_data['graphViz']['vizLabel'] = node_data.get(label_key, f"ID: {nid}")
         elif 'nodeType' in node_data:
-            node_data['vizLabel'] = f"{node_data['nodeType']} ID: {nid}"
+            node_data['graphViz']['vizLabel'] = f"{node_data['nodeType']} ID: {nid}"
         else:
-            node_data['vizLabel'] = f"ID: {nid}"
+            node_data['graphViz']['vizLabel'] = f"ID: {nid}"
 
         # Extract non-viz keys for detail display
-        keys = [key for key in node_data.keys() if not key.startswith('viz')]
-        node_data['nodeDetail'] = {key: node_data[key] for key in keys}
+        keys = [key for key in node_data.keys() if key not in ['graphViz', 'dataGeneration']]
+        node_data['graphViz']['vizDetail'] = {key: node_data[key] for key in keys}
 
 
 def update_edges_keys(G):
     """Update edge labels and extract details."""
-    for u, v, data in G.edges(data=True): # Iterate through all edges
-        u_label = G.nodes[u].get('vizLabel', f"ID: {u}")
-        v_label = G.nodes[v].get('vizLabel', f"ID: {v}")
-        rel_type = data.get('relationshipType', 'UNKNOWN')
+    for u, v, edge_data in G.edges(data=True): # Iterate through all edges
+        u_label = G.nodes[u].get('graphViz', {}).get('vizLabel', f"ID: {u}")
+        v_label = G.nodes[v].get('graphViz', {}).get('vizLabel', f"ID: {v}")
+        rel_type = edge_data.get('relationshipType', 'UNKNOWN')
+
+        # initiate graphViz property
+        if 'graphViz' not in edge_data.keys():
+            edge_data['graphViz'] = {}
 
         # Construct a meaningful label
-        data['vizLabel'] = f"{rel_type}: {u_label} -> {v_label}"
+        edge_data['graphViz']['vizLabel'] = f"{rel_type}: {u_label} -> {v_label}"
 
         # Extract non-viz keys for detail display
-        keys = [key for key in data.keys() if not key.startswith('viz')]
-        data['edgeDetail'] = {key: data[key] for key in keys}
+        keys = [key for key in edge_data.keys() if key not in ['graphViz', 'dataGeneration']]
+        edge_data['graphViz']['vizDetail'] = {key: edge_data[key] for key in keys}
 
 
 # =============================================================================
@@ -253,6 +274,7 @@ class GraphViz:
         self.title = title
         self.node_color_map = {} # To store node color mapping
         self.edge_color_map = {} # To store edge color mapping
+
 
     def preprocessing(self):
         """Preprocessing Paper Graph and store color maps"""
@@ -267,6 +289,7 @@ class GraphViz:
         update_node_keys(self.graph, node_key_ref)
         update_edges_keys(self.graph)
         print("Preprocessing complete.")
+
 
     def _create_legend(self, color_map: Dict[str, str], title: str) -> Div:
         """Helper function to create an HTML legend Div."""
@@ -321,30 +344,21 @@ class GraphViz:
             x=[pos[nid][0] for nid in node_ids],
             y=[pos[nid][1] for nid in node_ids],
             nodeType=[node_data.get('nodeType', 'Unknown/Default') for nid, node_data in self.graph.nodes(data=True)],
-            nodeDetail=[node_data.get('nodeDetail', {}) for nid, node_data in self.graph.nodes(data=True)],
-            vizSize=[node_data.get('vizSize', 10) for nid, node_data in self.graph.nodes(data=True)],
-            vizColor=[node_data.get('vizColor', '#CCCCCC') for nid, node_data in self.graph.nodes(data=True)],
-            vizBorderColor=[node_data.get('vizBorderColor', '#888888') for nid, node_data in self.graph.nodes(data=True)],
-            vizBorderWidth=[node_data.get('vizBorderWidth', 1) for nid, node_data in self.graph.nodes(data=True)],
-            vizLabel=[str(node_data.get('vizLabel', nid)) for nid, node_data in self.graph.nodes(data=True)], # Ensure label is string
+            vizSize=[node_data.get('graphViz', {}).get('vizSize', 10) for nid, node_data in self.graph.nodes(data=True)],
+            vizColor=[node_data.get('graphViz', {}).get('vizColor', '#CCCCCC') for nid, node_data in self.graph.nodes(data=True)],
+            vizBorderColor=[node_data.get('graphViz', {}).get('vizBorderColor', '#888888') for nid, node_data in self.graph.nodes(data=True)],
+            vizBorderWidth=[node_data.get('graphViz', {}).get('vizBorderWidth', 1) for nid, node_data in self.graph.nodes(data=True)],
+            vizLabel=[str(node_data.get('graphViz', {}).get('vizLabel', nid)) for nid, node_data in self.graph.nodes(data=True)], 
+            vizDetail=[node_data.get('graphViz', {}).get('vizDetail', {}) for nid, node_data in self.graph.nodes(data=True)],
         )
 
         edge_starts = []
         edge_ends = []
         edge_data_list = []
-        for i, (u, v, data) in enumerate(self.graph.edges(data=True)):
+        for u, v, edge_data in self.graph.edges(data=True):
             edge_starts.append(u)
             edge_ends.append(v)
-            # Add the original weight back if needed for hover/search
-            data['weight'] = data.get('weight', 'N/A')
-             # Ensure edgeDetail exists
-            if 'edgeDetail' not in data: data['edgeDetail'] = {}
-            # Ensure vizLabel exists and is string
-            if 'vizLabel' not in data: data['vizLabel'] = f"{u}->{v}"
-            else: data['vizLabel'] = str(data['vizLabel'])
-
-            edge_data_list.append(data)
-
+            edge_data_list.append(edge_data)
 
         edge_ids = list(range(len(edge_starts))) # Index based ID
 
@@ -353,11 +367,11 @@ class GraphViz:
             end=edge_ends,
             edge_id=edge_ids, # Keep simple index for internal reference
             edgeType=[data.get('relationshipType', 'Unknown/Default') for data in edge_data_list],
-            edgeDetail=[data.get('edgeDetail', {}) for data in edge_data_list],
-            vizWidth=[data.get('vizWidth', 1) for data in edge_data_list],
-            vizColor=[data.get('vizColor', '#AAAAAA') for data in edge_data_list],
-            vizLabel=[data.get('vizLabel', '') for data in edge_data_list],
-            weight=[data.get('weight', 'N/A') for data in edge_data_list] # Add weight here
+            edge_weight=[data.get('weight', 0.5) for data in edge_data_list],
+            edgeDetail=[data.get('graphViz', {}).get('vizDetail', {}) for data in edge_data_list],
+            vizColor=[data.get('graphViz', {}).get('vizColor', '#AAAAAA') for data in edge_data_list],
+            vizLabel=[data.get('graphViz', {}).get('vizLabel', '') for data in edge_data_list],
+            vizWidth=[data.get('graphViz', {}).get('vizWidth', 'N/A') for data in edge_data_list] # Add weight here
         )
 
         node_source = ColumnDataSource(data=node_viz_info, name="Node Source")
@@ -417,7 +431,7 @@ class GraphViz:
                                if field.split('{')[0].lstrip('@') in node_viz_info]
         node_hover = HoverTool(tooltips=valid_node_tooltips, renderers=[graph_renderer.node_renderer])
 
-        edge_hover_tooltips = [("Label", "@vizLabel{safe}"), ("Type", "@edgeType"), ("Weight", "@weight")]
+        edge_hover_tooltips = [("Label", "@vizLabel{safe}"), ("Type", "@edgeType"), ("Weight", "@edge_weight")]
         valid_edge_tooltips = [(label, field) for label, field in edge_hover_tooltips
                                if field.split('{')[0].lstrip('@') in edge_viz_info]
         edge_hover = HoverTool(tooltips=valid_edge_tooltips, renderers=[graph_renderer.edge_renderer])
@@ -509,7 +523,7 @@ class GraphViz:
                     // Use the globally defined escapeHtml here
                     const node_label = escapeHtml(String(node_data['vizLabel'][index] || 'N/A'));
                     const node_id = escapeHtml(String(node_data['node_id'][index] || 'N/A'));
-                    const node_details = node_data['nodeDetail'][index];
+                    const node_details = node_data['vizDetail'][index];
 
                     console.log("Node Details object:", node_details);
 
@@ -531,7 +545,7 @@ class GraphViz:
 
                     // Use the globally defined escapeHtml here
                     const edge_label = escapeHtml(String(edge_data['vizLabel'][index] || 'N/A'));
-                    const edge_details = edge_data['edgeDetail'][index];
+                    const edge_details = edge_data['vizDetail'][index];
 
                     console.log("Edge Details object:", edge_details);
 
@@ -672,7 +686,7 @@ class GraphViz:
             Div(height=10, styles={'border-top': '1px solid #eee', 'margin-top': '10px'}), # Separator
             node_legend_div,
             edge_legend_div,
-            # Div(height=10, styles={'border-top': '1px solid #eee', 'margin-top': '10px'}), # Separator
+            Div(height=10, styles={'border-top': '1px solid #eee', 'margin-top': '10px'}), # Separator
             detail_div, # Details at the bottom
             width=320,
             height=plot_height, # Match plot height
