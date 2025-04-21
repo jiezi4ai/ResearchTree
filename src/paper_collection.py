@@ -8,7 +8,7 @@ import os
 parent_dir = os.path.dirname(os.getcwd())
 sys.path.append(parent_dir)
 
-from paper_expansion import PaperExpansion
+from Project.ResearchTree.src.paper_expansion_bkp import PaperExpansion
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

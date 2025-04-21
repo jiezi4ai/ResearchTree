@@ -75,7 +75,7 @@ class RelatedTopicQuery:
 
         if not seed_paper_texts:
             logging.error("No text found for seed papers to generate topics.")
-            return {}
+            return None
         if not domains:
             logging.warning("No domains found for seed papers, using 'General Science'.")
             domain = "General Science"
@@ -99,7 +99,7 @@ class RelatedTopicQuery:
             keywords_topics_info = await async_llm_gen_w_retry(self.llm_api_key, self.llm_model_name, qa_prompt, sys_prompt=None, temperature=0.6)
             if not keywords_topics_info:
                  logging.error("LLM returned empty response for topic generation.")
-                 return {}
+                 return None
 
             # Repair and parse JSON
             repaired_json_str = repair_json(keywords_topics_info)
@@ -108,10 +108,10 @@ class RelatedTopicQuery:
 
         except json.JSONDecodeError as e:
             logging.error(f"LLM Topic Generation - JSON Repair/Decode Error: {e}. Original output: {keywords_topics_info}")
-            return {}
+            return None
         except Exception as e:
             logging.error(f"Error during LLM topic generation or processing: {e}")
-            return {}
+            return None
 
         return keywords_topics_json
     
@@ -125,6 +125,7 @@ class RelatedTopicQuery:
 
         seed_paper_dois = {node['id'] for node in seed_paper_json} # Get current node IDs
         query_topics = keywords_topics_json.get('queries', []) # Default to empty list
+        
 
         for topic in query_topics:
             topic_hash_id = generate_hash_key(topic)
@@ -176,13 +177,30 @@ class RelatedTopicQuery:
 
         tasks = []
 
-        for query in topic_queries:
+        async def _fetch_related_for_query(query):
             logging.info(f"Fetching related papers for query: '{query[:50]}...'")
-            coro = await self.s2.async_search_paper_by_keywords(query, fields_of_study=fields_of_study, limit=limit)
-            tasks.append(coro)
+            s2_paper_metadata = await self.s2.async_search_paper_by_keywords(query, fields_of_study=fields_of_study, limit=limit)
+
+            logging.info(f"Processing {len(s2_paper_metadata)} related papers for query '{query[:50]}...'")
+            s2_papermeta_json = process_related_metadata( 
+                s2_related_metadata=s2_paper_metadata,
+                topic=query,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                fields_of_study=fields_of_study
+            )
+            # Mark nodes
+            for item in s2_papermeta_json:
+                if item['type'] == 'node' and item['labels'] == ['Paper']:
+                    item['properties']['from_related_topics'] = True
+                    item['properties']['is_complete'] = True
+            return s2_papermeta_json
+
+        for query in topic_queries:
+            tasks.append(_fetch_related_for_query(query))
 
         # Run all related paper searches concurrently
-        related_topic_papers = []
+        all_processed_items = []
         if tasks:
             logging.info(f"Running {len(tasks)} related paper search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -190,19 +208,6 @@ class RelatedTopicQuery:
                 if isinstance(result, Exception):
                     logging.error(f"Related paper search task failed: {result}")
                 elif isinstance(result, list):
-                    # get paper json data
-                    result_json = process_related_metadata( 
-                        s2_related_metadata=result,
-                        topic=query,
-                        from_dt=from_dt,
-                        to_dt=to_dt,
-                        fields_of_study=fields_of_study
-                    )
-                    # Mark nodes
-                    for item in result_json:
-                        if item['type'] == 'node' and item['labels'] == ['Paper']:
-                            item['properties']['from_related_topics'] = True
-                            item['properties']['is_complete'] = True
-                    related_topic_papers.extend(result_json)
+                    all_processed_items.extend(result)
 
-        return related_topic_papers
+        return all_processed_items
