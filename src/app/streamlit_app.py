@@ -94,3 +94,6 @@ with st.container():
 
     with st.container():
         st.write(dois_input)
+
+    with st.container():
+        st.bokeh_chart(figure, use_container_width=True)

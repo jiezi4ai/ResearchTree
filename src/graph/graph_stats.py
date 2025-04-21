@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Union, Tuple, Literal # Added Tuple
 
 from paper_graph import PaperGraph
 
-def basic_stats(graph):
+def get_graph_stats(graph):
     """basic stats for graph"""
     graph_stats = {}
     graph_stats['node_cnt'] = len(graph.nodes)
@@ -29,91 +29,120 @@ def basic_stats(graph):
     return graph_stats
 
 
-def paper_stats(graph:PaperGraph, seed_paper_dois, order_by: Optional[Literal['reference', 'cited', 'similarity']]='cited'):
+def get_paper_stats(graph, seed_paper_dois):
     """get paper statistic in paper graph"""
-
-    basic_stat = []
-    for nid, node_data in graph.nodes:
+    papers_stats = []
+    for nid, node_data in graph.nodes(data=True):
         if node_data.get('nodeType') == 'Paper':
+            # paper infos
+            title = graph.nodes[nid].get('title')
+            in_seed = True if nid in seed_paper_dois else False
+            overall_cite_cnt = node_data.get('citationCount')
+            overall_inf_cite_cnt = node_data.get('influentialCitationCount')
+            overall_ref_cnt = node_data.get('influentialCitationCount')
+
             # for in edges
             in_edges_info = graph.in_edges(nid, data=True)
-            cite_cnt = sum([1 for _, _, edge_data in in_edges_info if edge_data.get('relationshipType') == 'CITES'])
-            sim_cnt_1 = sum([1 for _, _, edge_data in in_edges_info if edge_data.get('relationshipType') == 'SIMILAR_TO'])
-            
+            local_citation_cnt = 0  # local paper graph cites papers (other cites this one)
+            sim_cnt_1 = 0  # local paper graph similar papers to this one
+            max_sim_to_seed_1 = -1  # max similarity of this paper to seed papers
+            for u, _, edge_data in in_edges_info:
+                if edge_data.get('relationshipType') == 'CITES':
+                    local_citation_cnt += 1
+                elif edge_data.get('relationshipType') == 'SIMILAR_TO':
+                    sim_cnt_1 += 1
+                    if u in seed_paper_dois:
+                        if edge_data.get('weight') > max_sim_to_seed_1:
+                            max_sim_to_seed_1 = edge_data.get('weight')
+
             # for out edges
             out_edges_info = graph.out_edges(nid, data=True)
-            cited_cnt = sum([1 for _, _, edge_data in out_edges_info if edge_data.get('relationshipType') == 'CITES'])
-            sim_cnt_2 = sum([1 for _, _, edge_data in out_edges_info if edge_data.get('relationshipType') == 'SIMILAR_TO'])
+            local_ref_cnt = 0  # local paper graph cites papers (other cites this one)
+            sim_cnt_2 = 0  # local paper graph similar papers to this one
+            max_sim_to_seed_2 = -1  # max similarity of this paper to seed papers
+            for _, v, edge_data in out_edges_info:
+                if edge_data.get('relationshipType') == 'CITES':
+                    local_ref_cnt += 1
+                elif edge_data.get('relationshipType') == 'SIMILAR_TO':
+                    sim_cnt_2 += 1
+                    if v in seed_paper_dois:
+                        if edge_data.get('weight') > max_sim_to_seed_2:
+                            max_sim_to_seed_2 = edge_data.get('weight')
 
-            sim_cnt = sim_cnt_1 + sim_cnt_2
-            basic_stat.append((n, cite_cnt, cited_cnt, sim_cnt))
+            # author infors
+            author_ids_lst = [x['authorId'] for x in node_data.get('authors', []) if x.get('authorId') is not None]
+            tot_author_cnt = len(author_ids_lst)
 
-    if order_by == 'cited':
-        sorted_stat = sorted(basic_stat, key=lambda item: item[1], reverse=True)
-    elif order_by == 'reference':
-        sorted_stat = sorted(basic_stat, key=lambda item: item[2], reverse=True) 
-    elif order_by == 'similarity':
-        sorted_stat = sorted(basic_stat, key=lambda item: item[3], reverse=True) 
-
-    papers_stats = []
-    for item in sorted_stat:
-        n = item[0]
-        local_citation_cnt = item[1]
-        local_ref_cnt = item[2]
-        local_sim_cnt = item[3]
-
-        # paper infos
-        title = graph.nodes[n].get('title')
-        in_seed = True if item[0] in seed_paper_dois else False
-        overall_cite_cnt = graph.nodes[n].get('citationCount')
-        overall_inf_cite_cnt = graph.nodes[n].get('influentialCitationCount')
-        overall_ref_cnt = graph.nodes[n].get('influentialCitationCount')
-
-        # author infors
-        tot_author_cnt = sum([1 for u in graph.predecessors(n) if graph.nodes[u].get('nodeType') == 'Author'])
-        h_index_lst, author_order_lst = [], []
-        for u in graph.predecessors(n):
-            if graph.nodes[u].get('nodeType') == 'Author':
-                h_index = graph.nodes[u].get('hIndex')
-                author_order = graph[u][n].get('authorOrder')
-                if h_index:
+            # get author order and h-index
+            h_index_lst, author_order_lst = [], []
+            for idx, aid in enumerate(author_ids_lst):
+                author_order = idx + 1
+                h_index = graph.nodes[aid].get('hIndex')
+                if h_index is not None:
                     h_index_lst.append(h_index)
                     author_order_lst.append(author_order)
-                    
-        avg_h_index = np.average(h_index_lst)
-        weight_h_index = sum([x / y for x, y in zip(h_index_lst, author_order_lst)]) / len(h_index_lst)
 
-        paper_stats = {"doi":n, "title":title, "if_seed": in_seed,
-                      "local_citation_cnt":local_citation_cnt, "local_reference_cnt": local_ref_cnt, "local_similarity_cnt":local_sim_cnt,
-                      "global_citaion_cnt":overall_cite_cnt, "influencial_citation_cnt":overall_inf_cite_cnt, "global_refence_cnt": overall_ref_cnt,
-                      "author_cnt":tot_author_cnt, "avg_h_index":avg_h_index, 'weighted_h_index':weight_h_index}
-        papers_stats.append(paper_stats)
+            if len(h_index_lst) > 0:
+                avg_h_index = np.average(h_index_lst)
+                weight_h_index = sum([x / y for x, y in zip(h_index_lst, author_order_lst)]) / len(h_index_lst)
+            else:
+                avg_h_index = None
+                weight_h_index = None
 
-        return papers_stats
-    
-def author_stats(graph, seed_author_ids, order_by:Optional[str]='write'):
+            paper_stats = {"doi":nid, "title":title, "if_seed": in_seed,
+                           "local_citation_cnt":local_citation_cnt, "local_reference_cnt": local_ref_cnt, 
+                           "local_similarity_cnt":sim_cnt_1+sim_cnt_2, "max_sim_to_seed":max(max_sim_to_seed_1, max_sim_to_seed_2),
+                           "global_citaion_cnt":overall_cite_cnt, "influencial_citation_cnt":overall_inf_cite_cnt, "global_refence_cnt": overall_ref_cnt,
+                           "author_cnt":tot_author_cnt, "avg_h_index":avg_h_index, 'weighted_h_index':weight_h_index}
+            papers_stats.append(paper_stats)
+    return papers_stats
+
+
+def get_author_stats(graph, seed_author_ids):
     """get author statistic in paper graph"""
-    basic_stat = []
-    for n in graph.nodes:
-        if graph.nodes[n].get('nodeType') == 'Author':
-            out_edges_info = graph.out_edges(n, data=True)
-            write_cnt = sum([1 for u, v, data in out_edges_info if data.get('relationshipType') == 'WRITES'])
-            basic_stat.append((n, write_cnt))
 
-    sorted_by_writes = sorted(basic_stat, key=lambda item: item[1], reverse=True)
+    h_index_ref = {nid:node_data['hIndex'] for nid, node_data in graph.nodes(data=True) if node_data.get('nodeType') == 'Author' 
+                   and node_data.get('hIndex') is not None}
 
     authors_stats = []
-    for item in sorted_by_writes:
-        aid = item[0]
-        a_name = graph.nodes[aid].get('name')
-        hIndex = graph.nodes[aid].get('hIndex')
-        in_seed = True if aid in seed_author_ids else False
-        global_paper_cnt = graph.nodes[aid].get('paperCount')
-        global_citation_cnt = graph.nodes[aid].get('citationCount')
-        
-        author_stat = {"author_id":aid, "author_name":a_name, 
-                       "write_cnt":item[1], "is_seed":in_seed,
-                       "hIndex":hIndex, "global_paper_cnt":global_paper_cnt, 
-                       "global_citation_cnt":global_citation_cnt, }
-        authors_stats.append(author_stat)
+    for nid, node_data in graph.nodes(data=True):
+        if node_data.get('nodeType') == 'Author':
+            # properties
+            author_name = node_data.get('name')
+            h_index = node_data.get('hIndex')
+            in_seed = True if nid in seed_author_ids else False
+            global_paper_cnt = node_data.get('paperCount')
+            global_citation_cnt = node_data.get('citationCount')
+
+            # local stats
+            out_edges_info = graph.out_edges(nid, data=True)
+            local_paper_cnt = sum([1 for _, _, data in out_edges_info if data.get('relationshipType') == 'WRITES'])
+            # get coauthors
+            coauthor_ids = []
+            for u,v, edge_data in out_edges_info:
+                if edge_data.get('relationshipType') == 'WRITES':
+                    coauthors = edge_data.get('coauthors', [])
+                    coauthor_ids.extend([x['authorId'] for x in coauthors if x.get('authorId') is not None])
+            
+            # get top coauthors
+            coauthor_cnt = Counter(coauthor_ids)
+            top_coauthors = coauthor_cnt.most_common()[0:5]  # rank order by descending
+
+            # calculate top coauthor h-index
+            coauthor_cnt = 0
+            sum_coauthor_h_index = 0
+            for idx, item in enumerate(top_coauthors):
+                coauthor_id = item[0]
+                coauthor_hindex = h_index_ref.get(coauthor_id)
+                if coauthor_hindex is not None:
+                    sum_coauthor_h_index += coauthor_hindex /(idx + 1)
+                    coauthor_cnt += 1
+            weighted_coauthor_h_index = sum_coauthor_h_index / coauthor_cnt if coauthor_cnt > 0 else None
+
+            author_stat = {"author_id":nid, "author_name":author_name, "is_seed":in_seed,
+                           "h_index":h_index, "global_paper_cnt":global_paper_cnt, "global_citation_cnt":global_citation_cnt,
+                           "local_paper_cnt":local_paper_cnt, 
+                           "top_coauthors":top_coauthors, "weighted_coauthor_h_index": weighted_coauthor_h_index
+                          }
+            authors_stats.append(author_stat)
     return authors_stats

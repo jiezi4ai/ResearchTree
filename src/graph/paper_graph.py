@@ -206,7 +206,7 @@ class PaperGraph(nx.MultiDiGraph):
         found_subgraphs = []
         found_components_nodes = set() # 用于跟踪已添加的分量的节点集，避免重复
 
-        for component_nodes in nx.weakly_connected_components(self.graph):
+        for component_nodes in nx.weakly_connected_components(self):
             component_set = set(component_nodes)
             # 4. 检查当前分量是否包含任何目标节点 (使用集合交集)
             if not target_nodes_set.isdisjoint(component_set): # 如果交集非空
@@ -229,12 +229,11 @@ class PaperGraph(nx.MultiDiGraph):
 
     def detect_louvain_community(
             self, 
-            subgraph, 
             community_type: Literal['louvain',  # louvian community detection algorithm
                                     'lpa',  # label propagation community detection algorithm
                                     ] = 'louvain'
             ):
-        graph = subgraph.to_undirected()
+        graph = self.to_undirected()
         if community_type == 'Louvain':  # 使用 Louvain 算法发现社群
             communities = community_louvain.best_partition(graph)
         elif community_type == 'lpa': # 使用标签传播算法发现社群
@@ -256,7 +255,6 @@ class PaperGraph(nx.MultiDiGraph):
 
     def cal_node_centrality(
             self, 
-            subgraph = None, 
             type_of_centrality:Optional[Literal['in',  # in degree centrality
                                                 'out',   # out degree centrality
                                                 'between',  # betweenness centrality 
@@ -265,59 +263,58 @@ class PaperGraph(nx.MultiDiGraph):
             ):
         """Calculate node centrality and sort in descending order
         """
-        subgraph = subgraph if subgraph is not None else self.graph
         if type_of_centrality == 'in':  # 计算入度中心性
-            centrality = nx.in_degree_centrality(subgraph)
+            centrality = nx.in_degree_centrality(self)
         elif type_of_centrality == 'out':  # 计算出度中心性
-            centrality = nx.out_degree_centrality(subgraph)
+            centrality = nx.out_degree_centrality(self)
         elif type_of_centrality == 'between':  # 计算介数中心性
-            centrality = nx.betweenness_centrality(subgraph)
+            centrality = nx.betweenness_centrality(self)
         elif type_of_centrality == 'closeness':  # 计算紧密中心性
-            centrality = nx.closeness_centrality(subgraph)
+            centrality = nx.closeness_centrality(self)
         
         sorted_centrality = sorted(centrality.items(), key=lambda item: item[1], reverse=True)
         return sorted_centrality
 
 
-    def assign_edge_weight_mannually(self, subgraph):
-        for u, v in subgraph.edges():
-            if subgraph.edges[u, v]['relationshipType'] in ['CITES']:  # paper -cites - paper
-                subgraph.edges[u, v]['weight'] = 0.5
-            elif subgraph.edges[u, v]['relationshipType'] in ['DISCUSS']:  # paper - discuss - topic
-                subgraph.edges[u, v]['weight'] = 0.4
-            elif subgraph.edges[u, v]['relationshipType'] in ['WRITES']:  # author - writes - paper
-                subgraph.edges[u, v]['weight'] = 0.3 
-            elif subgraph.edges[u, v]['relationshipType'] in ['WORKS_IN']:  # author -works in - affliation
-                subgraph.edges[u, v]['weight'] = 0.2
-            elif subgraph.edges[u, v]['relationshipType'] in ['PRINTS_ON', 'RELEASES_IN']:  # paper - prints on / relaeses in - journal / veneue
-                subgraph.edges[u, v]['weight'] = 0.1
-        return subgraph
+    def assign_edge_weight_mannually(self):
+        for u, v in self.edges():
+            if self.edges[u, v]['relationshipType'] in ['CITES']:  # paper -cites - paper
+                self.edges[u, v]['weight'] = 0.5
+            elif self.edges[u, v]['relationshipType'] in ['DISCUSS']:  # paper - discuss - topic
+                self.edges[u, v]['weight'] = 0.4
+            elif self.edges[u, v]['relationshipType'] in ['WRITES']:  # author - writes - paper
+                self.edges[u, v]['weight'] = 0.3 
+            elif self.edges[u, v]['relationshipType'] in ['WORKS_IN']:  # author -works in - affliation
+                self.edges[u, v]['weight'] = 0.2
+            elif self.edges[u, v]['relationshipType'] in ['PRINTS_ON', 'RELEASES_IN']:  # paper - prints on / relaeses in - journal / veneue
+                self.edges[u, v]['weight'] = 0.1
+        return self
 
 
-    def convert_to_homogeneous_graph(self, subgraph, candit_edges):
+    def convert_to_homogeneous_graph(self, candit_edges):
         candit_ref = {(x['startNodeId'], x['endNodeId']):x['properties']['weight'] for x in candit_edges}
         filtered_nodes, filtered_edges = [], []
 
         # 过滤 ["Journal"] ["Venue"] ["Affiliation"] 节点
-        for node_id in subgraph.nodes():
-            if subgraph.nodes[node_id]['labels'][0] not in ['Journal', 'Venue', 'Affiliation']:
+        for node_id in self.nodes():
+            if self.nodes[node_id]['labels'][0] not in ['Journal', 'Venue', 'Affiliation']:
                 filtered_nodes.append(node_id)
 
         # 过滤 WORKS_IN, PRINTS_ON, RELEASES_IN等类型的边
-        for u, v in subgraph.edges():
-            if subgraph.edges[u, v]['relationshipType'] not in ['WORKS_IN', 'PRINTS_ON', 'RELEASES_IN']: 
+        for u, v in self.edges():
+            if self.edges[u, v]['relationshipType'] not in ['WORKS_IN', 'PRINTS_ON', 'RELEASES_IN']: 
                 filtered_edges.append((u, v))
         
         # 处理['Author']节点
         tmp_ref = []
-        for node_id in subgraph.nodes():
-            if subgraph.nodes[node_id]['labels'][0] in ['Author']:
+        for node_id in self.nodes():
+            if self.nodes[node_id]['labels'][0] in ['Author']:
                 # first get author node id
-                author_id = subgraph.nodes[node_id]['id']
+                author_id = self.nodes[node_id]['id']
                 # then get all sucessors for author node id
-                author_id_successors = subgraph.successors(author_id) 
-                paper_id_publish_dt_ref = {id:subgraph.nodes[node_id]['publicationDate']
-                    for id in author_id_successors if subgraph.nodes[node_id]['labels'][0] in ['Paper']}
+                author_id_successors = self.successors(author_id) 
+                paper_id_publish_dt_ref = {id:self.nodes[node_id]['publicationDate']
+                    for id in author_id_successors if self.nodes[node_id]['labels'][0] in ['Paper']}
                 for paper_id_1, publish_dt_1 in paper_id_publish_dt_ref.items():
                     for paper_id_2, publish_dt_2 in paper_id_publish_dt_ref.items():
                         if paper_id_1 != paper_id_2 and publish_dt_1 <= publish_dt_2:
@@ -333,14 +330,14 @@ class PaperGraph(nx.MultiDiGraph):
 
         # 处理 ['Topic']节点
         tmp_ref = []
-        for node_id in subgraph.nodes():
-            if subgraph.nodes[node_id]['labels'][0] in ['Topic']:
+        for node_id in self.nodes():
+            if self.nodes[node_id]['labels'][0] in ['Topic']:
                 # first get author node id
-                author_id = subgraph.nodes[node_id]['id']
+                author_id = self.nodes[node_id]['id']
                 # then get all sucessors for author node id
-                author_id_successors = subgraph.successors(author_id) 
-                paper_id_publish_dt_ref = {id:subgraph.nodes[node_id]['publicationDate']
-                    for id in author_id_successors if subgraph.nodes[node_id]['labels'][0] in ['Paper']}
+                author_id_successors = self.successors(author_id) 
+                paper_id_publish_dt_ref = {id:self.nodes[node_id]['publicationDate']
+                    for id in author_id_successors if self.nodes[node_id]['labels'][0] in ['Paper']}
                 for paper_id_1, publish_dt_1 in paper_id_publish_dt_ref.items():
                     for paper_id_2, publish_dt_2 in paper_id_publish_dt_ref.items():
                         if paper_id_1 != paper_id_2 and publish_dt_1 <= publish_dt_2:

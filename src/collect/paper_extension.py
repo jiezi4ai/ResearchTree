@@ -14,13 +14,13 @@ from collect.citation_query import CitationQuery
 from collect.author_query import AuthorQuery
 from collect.related_topic_query import RelatedTopicQuery
 
-from paper_search import PaperFinder
+from paper_search import PaperSearch
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-class PaperCollector(PaperFinder):
+class PaperExpand(PaperSearch):
     """
     A class for exploring academic papers using Semantic Scholar API and LLMs,
     optimized for asynchronous operations.

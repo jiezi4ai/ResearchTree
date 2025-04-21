@@ -19,7 +19,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-class PaperFinder:
+class PaperSearch:
     """
     A class for exploring academic papers using Semantic Scholar API and LLMs,
     optimized for asynchronous operations.
