@@ -78,7 +78,7 @@ class PaperQuery:
 
     async def get_paper_info(
             self,
-            research_topic: Optional[str] = None,
+            research_topics: Optional[List] = None,
             seed_paper_titles: Optional[Union[List[str], str]] = None,
             seed_paper_dois: Optional[Union[List[str], str]] = None,
             limit: Optional[int] = 100,
@@ -107,11 +107,14 @@ class PaperQuery:
                 tasks_with_source.append({'source':'title', 'value':title, 'result': coro})
                 task_coroutines.append(coro)
         
-        if research_topic:
-            logging.info(f"Fetching papers by topic: '{research_topic}...'")
-            coro = self.s2.async_search_paper_by_keywords(query=research_topic, fields_of_study=fields_of_study, limit=limit)
-            tasks_with_source.append({'source':'topic', 'value':research_topic, 'result': coro})
-            task_coroutines.append(coro)
+        if research_topics:
+            if isinstance(research_topics, str):
+                research_topics = [research_topics]
+            for topic in research_topics:
+                logging.info(f"Fetching papers by topic: '{topic}...'")
+                coro = self.s2.async_search_paper_by_keywords(query=topic, fields_of_study=fields_of_study, limit=limit)
+                tasks_with_source.append({'source':'topic', 'value':topic, 'result': coro})
+                task_coroutines.append(coro)
 
         # Run all initial query tasks concurrently
         all_results = []

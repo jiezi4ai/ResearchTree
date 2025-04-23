@@ -26,7 +26,7 @@ class PaperSearch:
     """
     def __init__(
             self,
-            research_topic: Optional[str] = None,
+            research_topics: Optional[List] = None,
             seed_paper_titles: Optional[Union[List[str], str]] = None,
             seed_paper_dois: Optional[Union[List[str], str]] = None,
             from_dt: Optional[str] = None,
@@ -43,7 +43,7 @@ class PaperSearch:
         (Args documentation omitted for brevity, same as original)
         """
         # seed papers info
-        self.research_topic = research_topic
+        self.research_topics = research_topics
         self.seed_paper_titles = [seed_paper_titles] if isinstance(seed_paper_titles, str) and seed_paper_titles else seed_paper_titles if isinstance(seed_paper_titles, list) else []
         self.seed_paper_dois = [seed_paper_dois] if isinstance(seed_paper_dois, str) and seed_paper_dois else seed_paper_dois if isinstance(seed_paper_dois, list) else []
 
@@ -73,7 +73,8 @@ class PaperSearch:
         self.explored_nodes = {'topic':[],   # topic explored
                                'author':[],   # authors explored 
                                'reference':[],  # papers with reference explored
-                               'citing': []  # papers with citation explored
+                               'citing': [],  # papers with citation explored
+                               'title': []
                                 }
 
 
@@ -131,25 +132,27 @@ class PaperSearch:
     ############################################################################
     async def init_search(
             self,
-            research_topic: Optional[str]=None,
+            research_topics: Optional[List]=None,
             seed_paper_titles: Optional[List]=None,
             seed_paper_dois: Optional[List]=None,
             round: Optional[int] = 1,
             search_limit: Optional[int] = 50,
             from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31"
+            to_dt: Optional[str]="9999-12-31",
+            fields_of_study: Optional[List] = None
         ):
         """basic search for seed paper related information"""
-        research_topic = research_topic if research_topic else self.research_topic
+        research_topics = research_topics if research_topics else self.research_topics
         seed_paper_titles = seed_paper_titles if seed_paper_titles else self.seed_paper_titles
         seed_paper_dois = seed_paper_dois if seed_paper_dois else self.seed_paper_dois
 
         pq = PaperQuery()
         initial_papers_json = await pq.get_paper_info(
-            research_topic=research_topic, 
+            research_topics=research_topics, 
             seed_paper_titles=seed_paper_titles,
             seed_paper_dois=seed_paper_dois,
-            limit=search_limit, from_dt=from_dt, to_dt=to_dt)
+            limit=search_limit, from_dt=from_dt, to_dt=to_dt,
+            fields_of_study=fields_of_study)
         
         # add item as json
         self._add_items_json(initial_papers_json, round, source='init_search')
@@ -166,8 +169,10 @@ class PaperSearch:
         self.seeds['author'].extend(seed_author_ids)
 
         # update explored nodes
-        if research_topic is not None:
-            self.explored_nodes['topic'].extend([research_topic])
+        if research_topics is not None:
+            self.explored_nodes['topic'].extend(research_topics)
+        if seed_paper_titles is not None:
+            self.explored_nodes['titles'].extend(seed_paper_titles)
 
 
     async def paper_search(

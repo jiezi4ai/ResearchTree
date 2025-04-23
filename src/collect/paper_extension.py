@@ -27,7 +27,7 @@ class PaperExpand(PaperSearch):
     """
     def __init__(
             self,
-            research_topic: Optional[str] = None,
+            research_topics: Optional[List] = None,
             seed_paper_titles: Optional[Union[List[str], str]] = None,
             seed_paper_dois: Optional[Union[List[str], str]] = None,
             llm_api_key: Optional[str] = None,
@@ -48,7 +48,7 @@ class PaperExpand(PaperSearch):
         (Args documentation omitted for brevity, same as original)
         """
         super().__init__(
-            research_topic=research_topic,
+            research_topics=research_topics,
             seed_paper_titles=seed_paper_titles,
             seed_paper_dois=seed_paper_dois,
             from_dt=from_dt,

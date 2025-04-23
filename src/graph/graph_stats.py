@@ -29,14 +29,14 @@ def get_graph_stats(graph):
     return graph_stats
 
 
-def get_paper_stats(graph, seed_paper_dois):
+def get_paper_stats(graph, exclusion_paper_dois):
     """get paper statistic in paper graph"""
     papers_stats = []
     for nid, node_data in graph.nodes(data=True):
         if node_data.get('nodeType') == 'Paper':
             # paper infos
             title = graph.nodes[nid].get('title')
-            in_seed = True if nid in seed_paper_dois else False
+            if_exclude = True if nid in exclusion_paper_dois else False  # exclude seed papers
             overall_cite_cnt = node_data.get('citationCount')
             overall_inf_cite_cnt = node_data.get('influentialCitationCount')
             overall_ref_cnt = node_data.get('influentialCitationCount')
@@ -51,7 +51,7 @@ def get_paper_stats(graph, seed_paper_dois):
                     local_citation_cnt += 1
                 elif edge_data.get('relationshipType') == 'SIMILAR_TO':
                     sim_cnt_1 += 1
-                    if u in seed_paper_dois:
+                    if u in exclusion_paper_dois:
                         if edge_data.get('weight') > max_sim_to_seed_1:
                             max_sim_to_seed_1 = edge_data.get('weight')
 
@@ -65,7 +65,7 @@ def get_paper_stats(graph, seed_paper_dois):
                     local_ref_cnt += 1
                 elif edge_data.get('relationshipType') == 'SIMILAR_TO':
                     sim_cnt_2 += 1
-                    if v in seed_paper_dois:
+                    if v in exclusion_paper_dois:
                         if edge_data.get('weight') > max_sim_to_seed_2:
                             max_sim_to_seed_2 = edge_data.get('weight')
 
@@ -89,7 +89,7 @@ def get_paper_stats(graph, seed_paper_dois):
                 avg_h_index = None
                 weight_h_index = None
 
-            paper_stats = {"doi":nid, "title":title, "if_seed": in_seed,
+            paper_stats = {"doi":nid, "title":title, "if_exclude": if_exclude,
                            "local_citation_cnt":local_citation_cnt, "local_reference_cnt": local_ref_cnt, 
                            "local_similarity_cnt":sim_cnt_1+sim_cnt_2, "max_sim_to_seed":max(max_sim_to_seed_1, max_sim_to_seed_2),
                            "global_citaion_cnt":overall_cite_cnt, "influencial_citation_cnt":overall_inf_cite_cnt, "global_refence_cnt": overall_ref_cnt,
@@ -98,7 +98,7 @@ def get_paper_stats(graph, seed_paper_dois):
     return papers_stats
 
 
-def get_author_stats(graph, seed_author_ids):
+def get_author_stats(graph, exclude_author_ids):
     """get author statistic in paper graph"""
 
     h_index_ref = {nid:node_data['hIndex'] for nid, node_data in graph.nodes(data=True) if node_data.get('nodeType') == 'Author' 
@@ -110,7 +110,7 @@ def get_author_stats(graph, seed_author_ids):
             # properties
             author_name = node_data.get('name')
             h_index = node_data.get('hIndex')
-            in_seed = True if nid in seed_author_ids else False
+            if_exclude = True if nid in exclude_author_ids else False  # exclude seed authors
             global_paper_cnt = node_data.get('paperCount')
             global_citation_cnt = node_data.get('citationCount')
 
@@ -139,7 +139,7 @@ def get_author_stats(graph, seed_author_ids):
                     coauthor_cnt += 1
             weighted_coauthor_h_index = sum_coauthor_h_index / coauthor_cnt if coauthor_cnt > 0 else None
 
-            author_stat = {"author_id":nid, "author_name":author_name, "is_seed":in_seed,
+            author_stat = {"author_id":nid, "author_name":author_name, "is_seed":if_exclude,
                            "h_index":h_index, "global_paper_cnt":global_paper_cnt, "global_citation_cnt":global_citation_cnt,
                            "local_paper_cnt":local_paper_cnt, 
                            "top_coauthors":top_coauthors, "weighted_coauthor_h_index": weighted_coauthor_h_index
