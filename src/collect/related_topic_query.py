@@ -17,13 +17,11 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-class RelatedTopicQuery:
+class TopicQuery:
     def __init__(
             self,
             nodes_json: Optional[List[Dict]] = None,
             edges_json: Optional[List[Dict]] = None, 
-            llm_api_key: Optional[str] = None,
-            llm_model_name: Optional[str] = None,
             from_dt: Optional[str] = None,
             to_dt: Optional[str] = None,
             fields_of_study: Optional[List[str]] = None,
@@ -39,10 +37,6 @@ class RelatedTopicQuery:
         self._node_ids = set()
         self._edge_tuples = set() # Store (start_id, end_id, type) tuples
 
-        # for llm
-        self.llm_api_key = llm_api_key
-        self.llm_model_name = llm_model_name
-
         # Filters
         self.from_dt = from_dt
         self.to_dt = to_dt
@@ -51,7 +45,10 @@ class RelatedTopicQuery:
 
     async def llm_gen_related_topics(
             self, 
-            seed_paper_json: List[Dict]) -> Optional[Dict]:
+            seed_paper_json: List[Dict],
+            llm_api_key: str,
+            llm_model_name: str,
+            ) -> Optional[Dict]:
         """Generate related topics using LLM asynchronously."""
         logging.info(f"Generating related topics for {len(seed_paper_json)} seed papers...")
         # Use existing node data, assuming initial query ran
@@ -96,7 +93,7 @@ class RelatedTopicQuery:
         logging.info("Calling LLM to generate topics...")
         try:
             # Assuming llm_gen_w_retry is async
-            keywords_topics_info = await async_llm_gen_w_retry(self.llm_api_key, self.llm_model_name, qa_prompt, sys_prompt=None, temperature=0.6)
+            keywords_topics_info = await async_llm_gen_w_retry(llm_api_key, llm_model_name, qa_prompt, sys_prompt=None, temperature=0.6)
             if not keywords_topics_info:
                  logging.error("LLM returned empty response for topic generation.")
                  return {}
@@ -156,7 +153,7 @@ class RelatedTopicQuery:
         return processed_json
     
 
-    async def get_related_papers(
+    async def get_topic_papers(
             self,
             topic_queries: List[str],
             limit: Optional[int] = 100,

@@ -66,19 +66,12 @@ class PaperQuery:
                             item['properties']['from_title_search'] = True
                             item['properties']['is_complete'] = True
                         i += 1
-                    
-            if source == 'topic':
-                for item in processed:
-                    if item['type'] == 'node' and item['labels'] == ['Paper']:
-                        item['properties']['from_topic_search'] = True
-                        item['properties']['is_complete'] = True
-            
+
             return processed
 
 
     async def get_paper_info(
             self,
-            research_topics: Optional[List] = None,
             seed_paper_titles: Optional[Union[List[str], str]] = None,
             seed_paper_dois: Optional[Union[List[str], str]] = None,
             limit: Optional[int] = 100,
@@ -107,15 +100,6 @@ class PaperQuery:
                 tasks_with_source.append({'source':'title', 'value':title, 'result': coro})
                 task_coroutines.append(coro)
         
-        if research_topics:
-            if isinstance(research_topics, str):
-                research_topics = [research_topics]
-            for topic in research_topics:
-                logging.info(f"Fetching papers by topic: '{topic}...'")
-                coro = self.s2.async_search_paper_by_keywords(query=topic, fields_of_study=fields_of_study, limit=limit, match_title=False)
-                tasks_with_source.append({'source':'topic', 'value':topic, 'result': coro})
-                task_coroutines.append(coro)
-
         # Run all initial query tasks concurrently
         all_results = []
         if task_coroutines:

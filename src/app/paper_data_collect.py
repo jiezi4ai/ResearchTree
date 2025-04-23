@@ -8,6 +8,7 @@ parent_dir = os.path.dirname(os.getcwd())
 sys.path.append(parent_dir)
 
 from collect.paper_query import PaperQuery
+from collect.related_topic_query import TopicQuery
 from collect.citation_query import CitationQuery
 from collect.author_query import AuthorQuery
 from collect.paper_recommendation import PaperRecommendation
@@ -40,6 +41,7 @@ class PaperSearch:
             aq_instance: Optional[AuthorQuery] = None, 
             cq_instance: Optional[CitationQuery] = None, 
             rq_instance: Optional[PaperRecommendation] = None, 
+            tq_instance: Optional[TopicQuery] = None
     ):
         """Initialize PaperSearch parameters."""
         # seed papers info
@@ -80,8 +82,17 @@ class PaperSearch:
                                'recommendation':set(),  # papers for recommendations, format like ([pos_paper_dois], [neg_paper_dois])
                                 }
         
+        # exclusion list
+        self.excluded_nodes = {'non_existing': set(),
+                               'out_of_scope': set(),
+        }
+        self.removed_nodes = []
+        self.removed_edges = []
+
+
         # initiate instances
         self.pq = pq_instance if pq_instance else PaperQuery()
+        self.tq = tq_instance if tq_instance else TopicQuery()
         self.aq = aq_instance if aq_instance else AuthorQuery()
         self.cq = cq_instance if cq_instance else CitationQuery()
         self.rq = rq_instance if rq_instance else PaperRecommendation()
@@ -127,6 +138,23 @@ class PaperSearch:
 
         self.nodes_json.extend(items_to_add_node)
         self.edges_json.extend(items_to_add_edge)
+
+
+    async def topic_generation(
+            self,
+            seed_paper_json: List[Dict],
+            llm_api_key: str,
+            llm_model_name: str
+            ):
+        """use LLM to generate related topics based on seed paper information"""
+        logging.info("Use LLM to identify key related topics.")
+        keywords_topics_json = await self.tq.llm_gen_related_topics(seed_paper_json, llm_api_key, llm_model_name)
+        topics_json = self.tq.get_topic_json(keywords_topics_json, seed_paper_json)
+
+        # add topic to json
+        self._add_items_json(topics_json, source="topic_extention")
+
+        return keywords_topics_json
  
     ############################################################################
     # paper collection functions
@@ -134,7 +162,6 @@ class PaperSearch:
     async def paper_search(
             self,
             # for paper info
-            topics: Optional[List]=[],
             paper_titles: Optional[List]=[],
             paper_dois: Optional[List]=[],
             # search params
@@ -144,32 +171,59 @@ class PaperSearch:
             fields_of_study: Optional[List] = None
         ):
         """basic search for seed paper related information"""
-        topics = [x for x in topics if x not in self.explored_nodes['topic']]
         paper_titles = [x for x in paper_titles if x not in self.explored_nodes['title']]
         paper_dois = [x for x in paper_dois if x not in self.explored_nodes['paper']]
 
-        if len(topics) > 0 or len(paper_titles) > 0 or len(paper_dois) > 0:
-            logging.info(f"Search {len(topics)} topics, {len(paper_titles)} paper titles and {len(paper_dois)} for paper information.")
+        if len(paper_titles) > 0 or len(paper_dois) > 0:
+            logging.info(f"Search {len(paper_titles)} paper titles and {len(paper_dois)} for paper information.")
             papers_json = await self.pq.get_paper_info(
-                research_topics=topics, 
                 seed_paper_titles=paper_titles,
                 seed_paper_dois=paper_dois,
                 limit=search_limit, 
                 from_dt=from_dt, 
                 to_dt=to_dt,
                 fields_of_study=fields_of_study)
-        
-        # add item as json
-        self._add_items_json(papers_json, source='paper_search')
-        logging.info(f"After paper search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+
+            # add item as json
+            self._add_items_json(papers_json, source='paper_search')
+            logging.info(f"After paper search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
 
         # update explored nodes
-        if len(topics) > 0:
-            self.explored_nodes['topic'].update(topics)
         if len(paper_titles) > 0:
             self.explored_nodes['title'].update(paper_titles)
         if len(paper_dois) > 0:
             self.explored_nodes['paper'].update(paper_dois)
+
+
+    async def topic_search(
+            self,
+            # for paper info
+            topics: Optional[List]=[],
+            # search params
+            search_limit: Optional[int] = 50,
+            from_dt: Optional[str]="2000-01-01",
+            to_dt: Optional[str]="9999-12-31",
+            fields_of_study: Optional[List] = None
+        ):
+        """basic search for seed paper related information"""
+        topics = [x for x in topics if x not in self.explored_nodes['topic']]
+
+        if len(topics) > 0:
+            logging.info(f"Search {len(topics)} topics for paper information.")
+            topics_json = await self.tq.get_topic_papers(
+                topic_queries=topics,
+                limit=search_limit, 
+                from_dt=from_dt, 
+                to_dt=to_dt,
+                fields_of_study=fields_of_study)
+        
+            # add item as json
+            self._add_items_json(topics_json, source='topic_search')
+            logging.info(f"After paper search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+
+        # update explored nodes
+        if len(topics) > 0:
+            self.explored_nodes['topic'].update(topics)
 
 
     async def author_search(
@@ -188,9 +242,9 @@ class PaperSearch:
             logging.info(f"Search {len(author_ids)} author information.")
             author_json = await self.aq.get_author_info(author_ids, from_dt, to_dt, fields_of_study)
         
-        # add item as json
-        self._add_items_json(author_json, source='author_search')
-        logging.info(f"After author search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+            # add item as json
+            self._add_items_json(author_json, source='author_search')
+            logging.info(f"After author search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
 
         # update explored nodes
         if len(author_ids) > 0:
@@ -267,9 +321,9 @@ class PaperSearch:
                 to_dt, 
                 fields_of_study)
 
-        # add item as json
-        self._add_items_json(recommend_json, source='paper_recommendation')
-        logging.info(f"After recommendation: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+            # add item as json
+            self._add_items_json(recommend_json, source='paper_recommendation')
+            logging.info(f"After recommendation: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
 
         # update explored nodes
         if len(pos_paper_dois) > 0:
@@ -300,9 +354,16 @@ class PaperSearch:
         """consolidate paper search, author search, citation search and paper recommendations"""
         tasks = []
 
-        if len(topics) > 0 or len(paper_titles) > 0 or len(paper_dois) > 0:
-            tasks.append(self.paper_search(
+        if len(topics) > 0:
+            tasks.append(self.topic_search(
                 topics,
+                search_limit,
+                from_dt,
+                to_dt,
+                fields_of_study))         
+
+        if len(paper_titles) > 0 or len(paper_dois) > 0:
+            tasks.append(self.paper_search(
                 paper_titles,
                 paper_dois,
                 search_limit,
@@ -337,8 +398,9 @@ class PaperSearch:
         
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    # help track error information
-                    logging.error(f"A sub-task in consolidated_search failed: {result}", exc_info=True)
+            if len(results) > 0:
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        # help track error information
+                        logging.error(f"A sub-task in consolidated_search failed: {result}", exc_info=True)
 
