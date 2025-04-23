@@ -13,8 +13,7 @@ from models.embedding_models import gemini_embedding_async, semantic_similarity_
 from collect.citation_query import CitationQuery
 from collect.author_query import AuthorQuery
 from collect.related_topic_query import RelatedTopicQuery
-
-from paper_search import PaperSearch
+from collect.paper_search import PaperSearch
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

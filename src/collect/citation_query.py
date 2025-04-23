@@ -56,7 +56,7 @@ class CitationQuery:
             s2_citation_metadata=s2_citedpaper_metadata,
             citation_type='citedPaper', # Reference (paper cites this)
             from_dt=from_dt,
-            to_dt=to_dt,
+            to_dt=to_dt, 
             fields_of_study=fields_of_study
         )
         # Mark nodes

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 MAX_CNT = 100  # set limit max
 BATCH_SIZE = 100  # S2 API batch size restriction
-DEFAULT_MAX_CONCURRENCY = 10 # Default concurrency limit
+DEFAULT_MAX_CONCURRENCY = 20 # Default concurrency limit
 DEFAULT_SLEEP_INTERVAL = 3.0 # Default sleep interval in seconds
 
 class SemanticScholarKit:
@@ -105,12 +105,15 @@ class SemanticScholarKit:
     def _sync_search_paper_by_keywords(self, **kwargs) -> List[Dict]:
         query = kwargs.get('query', 'N/A')
         limit = kwargs.get('limit', self.max_cnt)
+        match_title = kwargs.get('match_title', False)
         logger.info(f"_sync_search_paper_by_keywords: Thread started for query '{query[:50]}...' with limit {limit}.")
         try:
             # The actual API call happens here
             results = self.scholar.search_paper(**kwargs)
             paper_metadata = []
-            if results and hasattr(results, 'total') and results.total > 0:
+            if match_title == True and isinstance(results, Paper.Paper):  # single paper match
+                paper_metadata.append(results._data)
+            elif results and hasattr(results, 'total') and results.total > 0:
                 count = 0
                 # Iterate through results safely, respecting limit passed in kwargs
                 for item in results:
@@ -125,7 +128,7 @@ class SemanticScholarKit:
             return paper_metadata
         except Exception as e:
             logger.error(f"Error in _sync_search_paper_by_keywords for query '{query[:50]}...': {e}", exc_info=True)
-            return [] # Original behavior: return empty list on error
+            return []
 
     def _sync_get_paper_references(self, paper_id: str, limit: int) -> List[Dict]:
         logger.info(f"_sync_get_paper_references: Thread started for paper {paper_id} with limit {limit}.")
@@ -169,7 +172,6 @@ class SemanticScholarKit:
 
 
     # --- Asynchronous Public Methods (Interface Unchanged, Logic Updated) ---
-
     async def async_search_paper_by_ids(
         self,
         id_list: List[str]

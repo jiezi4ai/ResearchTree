@@ -330,7 +330,7 @@ def process_citation_metadata(
 
     # for citations (citing or cited papers)
     if isinstance(s2_citation_metadata, dict):
-        s2_citation_metadata = [s2_citation_metadata]
+        s2_citation_metadata = [s2_citation_metadata] 
     
     for item in s2_citation_metadata:
         existing_node_ids = [x['id'] for x in s2_citationmeta_json if x['type']=='node']

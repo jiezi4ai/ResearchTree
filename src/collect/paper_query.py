@@ -103,7 +103,7 @@ class PaperQuery:
         if seed_paper_titles:
             for title in seed_paper_titles:
                 logging.info(f"Fetching papers by title: '{title}...'")
-                coro = self.s2.async_search_paper_by_keywords(query=title, fields_of_study=fields_of_study, limit=limit)
+                coro = self.s2.async_search_paper_by_keywords(query=title, fields_of_study=fields_of_study, limit=limit, match_title=True)
                 tasks_with_source.append({'source':'title', 'value':title, 'result': coro})
                 task_coroutines.append(coro)
         
@@ -112,7 +112,7 @@ class PaperQuery:
                 research_topics = [research_topics]
             for topic in research_topics:
                 logging.info(f"Fetching papers by topic: '{topic}...'")
-                coro = self.s2.async_search_paper_by_keywords(query=topic, fields_of_study=fields_of_study, limit=limit)
+                coro = self.s2.async_search_paper_by_keywords(query=topic, fields_of_study=fields_of_study, limit=limit, match_title=False)
                 tasks_with_source.append({'source':'topic', 'value':topic, 'result': coro})
                 task_coroutines.append(coro)
 

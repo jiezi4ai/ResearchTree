@@ -18,9 +18,6 @@ from graph.graph_viz import GraphViz
 from collect.paper_extension import PaperExpand
 
 
-def router():
-    pass
-
 class PaperCollector:
     def __init(
             self,
@@ -101,60 +98,9 @@ class PaperCollector:
             recommend_limit = recommend_limit,
             citation_limit = citation_limit
             )
-
-    def _smart_setup(self):
-        # --- SETUP ---
-        # for topics
-        topics = []
-        if candit_topics is not None and self.research_topics is not None:
-            candit_topics = candit_topics + self.research_topics
-        elif self.research_topics is not None:
-            candit_topics = self.research_topics
-        elif candit_topics is not None:
-            candit_topics = candit_topics
-
-        for topic in candit_topics:
-            if topic not in self.ps.explored_nodes['topic']:
-                topics.append(topic) 
         
-        # for paper titles
-        titles = []
-        if candit_paper_dois is not None and self.seed_paper_titles is not None:
-            candit_paper_titles = candit_paper_titles + self.seed_paper_titles
-        elif self.seed_paper_titles is not None:
-            candit_paper_titles = self.seed_paper_titles
-        elif candit_paper_titles is not None:
-            candit_paper_titles = candit_paper_titles
 
-        for title in candit_paper_titles:
-            if title not in self.ps.explored_nodes['title']:
-                titles.append(title) 
-
-        # for paper titles
-        dois = []
-        if candit_paper_dois is not None and self.candit_paper_dois is not None:
-            candit_paper_dois = candit_paper_dois + self.seed_paper_titles
-        elif self.seed_paper_titles is not None:
-            candit_paper_dois = self.seed_paper_titles
-        elif candit_paper_dois is not None:
-            candit_paper_dois = candit_paper_dois
-
-        for doi in candit_paper_dois:
-            if doi not in self.ps.explored_nodes['paper']:
-                dois.append(doi) 
-
-        # set up parameters
-        # search limit
-        if len(dois) < 10 and len(titles) < 5 and len(topics) < 5:
-            search_limit = 100
-        else:
-            search_limit = 50
-
-        # time range
-        # check current node status, check dt status
-        # expand time range when needed
-
-    async def _pruning_and_routing(
+    async def _graph_routing(
             self, 
             round,
             nodes_json, 
@@ -162,24 +108,27 @@ class PaperCollector:
             core_paper_dois,
             exclusion_paper_dois,
             exclusion_author_ids,
+
+            candit_dois: Optional[List[str]] = [], 
+            candit_author_ids: Optional[List[str]] = [], 
+            candit_ref_dois: Optional[List[str]] = [], 
+            candit_citing_dois: Optional[List[str]] = [],
+            candit_topics: Optional[List[str]] = [],
+            extended_from_dt: Optional[str] = None,
+            extended_to_dt: Optional[str] = None
             ):
+        """routing search in paper graph"""
+        # params
         stop_flag = 1
         unexplored_core_flag = 0
         insufficient_nodes_flag = 0
         insufficient_crossrefs_flag = 0
         unexplored_related_topics_flag = 0
-
-        # --- Graph Stat ---
+        
+        # generate paper graph from nodes / edges json
         G_pre = PaperGraph(name='Paper Graph Init Search')
         G_pre.add_graph_nodes(nodes_json)
         G_pre.add_graph_edges(edges_json)
-        g_stat = get_graph_stats(G_pre)   # graph stats
-
-        # valid paper with abstracts
-        complete_paper_json = [node for node in nodes_json 
-                               if node['labels'] == ['Paper'] 
-                               and node['properties'].get('title') is not None and node['properties'].get('abstract') is not None]
-        complete_paper_dois = [node['id'] for node in complete_paper_json]
 
         # core papers and core authors nodes
         core_author_ids = []
@@ -188,6 +137,24 @@ class PaperCollector:
                 authors_id = [x['authorId'] for x in item['properties']['authors'] if x['authorId'] is not None] 
                 core_author_ids.extend(authors_id)
         core_author_ids = list(set(core_author_ids))
+
+        # check core paper completeness
+        # paper complete
+        candit_dois.extend([doi for doi in core_paper_dois if doi not in G_pre.nodes()]) 
+        # citation complete
+        candit_ref_dois.extend([doi for doi in core_paper_dois if doi not in self.ps.explored_nodes['reference']])
+        candit_citing_dois.extend([doi for doi in core_paper_dois if doi not in self.ps.explored_nodes['citing']])
+        # author complete
+        candit_author_ids.extend([aid for aid in core_author_ids if aid not in self.ps.explored_nodes['author']]) 
+
+        # --- Graph Stat ---
+        g_stat = get_graph_stats(G_pre)   # graph stats
+
+        # valid paper with abstracts
+        complete_paper_json = [node for node in nodes_json 
+                               if node['labels'] == ['Paper'] 
+                               and node['properties'].get('title') is not None and node['properties'].get('abstract') is not None]
+        complete_paper_dois = [node['id'] for node in complete_paper_json]
 
         # --- SIMILARITY CALCULATION ---
         # check if similarity with edge type
@@ -231,15 +198,6 @@ class PaperCollector:
             elif item[0] == 'Author':
                 author_cnt = item[1]
 
-        # check core paper completeness
-        # paper complete
-        missing_doi = [doi for doi in core_paper_dois if doi not in G_post.nodes()]
-        # citation complete
-        missing_ref = [doi for doi in core_paper_dois if doi not in self.ps.explored_nodes['reference']]
-        missing_citing = [doi for doi in core_paper_dois if doi not in self.ps.explored_nodes['citing']]
-        # author complete
-        missing_author = [aid for aid in core_author_ids if aid not in self.ps.explored_nodes['author']]
-
         paper_stats = get_paper_stats(G_post, exclusion_paper_dois)  # paper stats on graph
         author_stats = get_author_stats(G_post, exclusion_author_ids)  # author stats on graph
 
@@ -256,37 +214,41 @@ class PaperCollector:
             if (x['if_exclude'] == False  # exclude seed authors 
                 and x['local_paper_cnt'] > min(len(core_paper_dois), 5)):  # select most refered papers in graph
                 key_authors_stats.append(x)
-        
+
         # check paper similarity
         sorted_paper_similarity = sorted(paper_stats, key=lambda x:x['max_sim_to_seed'], reverse=True)
-
+        
+        # if cross ref insufficient, further expand similar papers on citation chain
+        if len(crossref_stats) < self.params['min_corssref_papers']:
+            # filter top similar papers (to help build crossref)
+            i = 0
+            for item in sorted_paper_similarity:
+                if i < self.parms['top_k_similar_papers']:
+                    if x['if_exclude'] == False and x['id'] not in self.ps.explored_nodes['reference']:
+                        candit_ref_dois.append(x['id'])
+                else:
+                    break
+        
+        # if key authors not have complete information
+        if len(key_authors_stats) > self.params['min_key_authors']:
+            sorted_key_authors = sorted(key_authors_stats, key=lambda x:x['local_paper_cnt'], reverse=True)
+            # filter key authors (to amplify information)
+            i = 0
+            for item in sorted_key_authors:
+                if i < self.parms['top_l_key_authors']:
+                    if x['if_exclude'] == False and x['id'] not in self.ps.explored_nodes['author']:
+                        candit_author_ids.append(x['id'])
+                else:
+                    break
+        
         # related topics information
         # to be added
 
-        # constraints on total # of nodes
-        if paper_cnt < self.params['min_paper_cnt'] or author_cnt > self.params['min_author_cnt']:
-            stop_flag = 0
-            insufficient_nodes = 1
-        # constraints on crossref papers
-        if len(crossref_stats) < self.params['min_corssref_papers']:
-            stop_flag = 0
-            insufficient_crossrefs = 1
-
-        # --- PROPOSE NEXT STEP ---
-        if round == 1:
-            # papers sufficient but 
-            if insufficient_nodes == 1:
-                
-            else:
-                if insufficient_crossrefs == 1:
-        else:  # round > 1
-            if insufficient_nodes == 1:
-                self.to_dt = self.from_dt
-                self.from_dt = datetime.strptime(self.from_dt, "%Y-%m-%d") - timedelta(weeks=52*5)
-                
-            and insufficient_nodes == 1:  
+        if len(candit_dois) == 0 and len(candit_ref_dois) == 0 and paper_cnt < 50:
+            # topic expansion
+            # date expansion
+            pass
             
-
 
     async def seed_search(
             self, 

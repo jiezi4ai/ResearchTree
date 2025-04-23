@@ -172,7 +172,7 @@ class PaperSearch:
         if research_topics is not None:
             self.explored_nodes['topic'].extend(research_topics)
         if seed_paper_titles is not None:
-            self.explored_nodes['titles'].extend(seed_paper_titles)
+            self.explored_nodes['title'].extend(seed_paper_titles)
 
 
     async def paper_search(

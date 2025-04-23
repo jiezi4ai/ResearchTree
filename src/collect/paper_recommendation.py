@@ -36,21 +36,22 @@ class PaperRecommendation:
 
     async def get_recommend_papers(
             self,
-            paper_dois: List[str], # Expecting list now based on gather usage
+            pos_paper_dois: List[str], 
+            neg_paper_dois: Optional[List[str]] = [],
             limit: Optional[int] = 100,
             from_dt: Optional[str] = None,
             to_dt: Optional[str] = None,
             fields_of_study: Optional[List[str]] = None,
     ) -> List[Dict]: # Return processed items
         """Retrieve recommended papers asynchronously."""
-        if not paper_dois: return []
+        if not pos_paper_dois: return []
 
         fields_of_study = fields_of_study if fields_of_study is not None else self.fields_of_study
         from_dt = from_dt if from_dt is not None else self.from_dt
         to_dt = to_dt if to_dt is not None else self.to_dt
 
-        logging.info(f"Fetching recommendations based on {len(paper_dois)} papers...")
-        s2_recommended_metadata = await self.s2.async_get_s2_recommended_papers(positive_paper_ids=paper_dois, limit=limit, with_abstract=True)
+        logging.info(f"Fetching recommendations based on {len(pos_paper_dois)} papers...")
+        s2_recommended_metadata = await self.s2.async_get_s2_recommended_papers(positive_paper_ids=pos_paper_dois, negative_paper_ids=neg_paper_dois, limit=limit, with_abstract=True)
 
         logging.info(f"Processing {len(s2_recommended_metadata)} recommended papers.")
         # reset id and filter papers 
