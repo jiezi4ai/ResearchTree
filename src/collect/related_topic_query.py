@@ -175,7 +175,13 @@ class TopicQuery:
 
         for query in topic_queries:
             logging.info(f"Fetching related papers for query: '{query[:50]}...'")
-            coro = await self.s2.async_search_paper_by_keywords(query, fields_of_study=fields_of_study, limit=limit, match_title=False)
+            coro = await self.s2.async_search_paper_by_keywords(
+                query=query, 
+                publication_types=['JournalArticle', 'Preprint', 'Review', 'Conference'],
+                publication_date_or_year=f'{from_dt}:{to_dt}',
+                fields_of_study=fields_of_study, 
+                limit=limit, 
+                match_title=False)
             tasks.append(coro)
 
         # Run all related paper searches concurrently
