@@ -224,6 +224,8 @@ class PaperSearch:
         if len(topics) > 0:
             self.explored_nodes['topic'].update(topics)
 
+    async def paper_author_search(self):
+        pass
 
     async def author_search(
             self,
