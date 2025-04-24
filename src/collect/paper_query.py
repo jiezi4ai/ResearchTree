@@ -1,6 +1,6 @@
 import asyncio
 from typing import List, Dict, Optional, Union, Literal, Tuple
-from semanticscholar import AsyncSemanticScholar, Paper, Author
+from semanticscholar import AsyncSemanticScholar, Paper
 
 from apis.s2_data_process import reset_and_filter_paper, process_paper_metadata
 
@@ -37,7 +37,7 @@ class PaperQuery:
     def post_process(
             self, 
             source: Literal['title', 'doi'], 
-            s2_result: Tuple[List[Paper.Paper], List[str]], 
+            s2_result: Tuple[List[Paper.Paer], List[str]], 
             from_dt: Optional[str] = None,
             to_dt: Optional[str] = None,
             fields_of_study: Optional[List[str]] = None,
@@ -75,7 +75,7 @@ class PaperQuery:
         # convert paper to json format (compatible with graph)
         processed = process_paper_metadata(filtered_s2_paper_metadata)
 
-            return processed
+        return processed
 
 
     async def get_paper_info(
@@ -159,7 +159,7 @@ class PaperQuery:
                     processed_results.extend(processed_result)
                 else:
                     # Handle cases where the API might return None without an exception
-                    logging.warning(f"Task for source '{source}' ({value}) returned None.")
+                    logging.warning(f"Task for source '{source}' ({values}) returned None.")
         else:
             logging.warning("No initial query criteria (DOI, Title, Topic) provided.")
         

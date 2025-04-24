@@ -1,16 +1,18 @@
+# s2_data_process.py
+# for now only filter over paper
+
 import re
 from typing import Optional, List, Dict, Literal
-from semanticscholar import Paper, Author
 
 from utils.data_process import generate_hash_key, remove_kth_element, remove_key_values, filter_and_reorder_dict
 
-def align_paper_metadata(s2_papers: List[Dict]|Dict):
-    """convert reset id for paper metadata (from semantic scholar)"""
-    if isinstance(s2_papers, dict):
-        s2_papers = [s2_papers]
+def align_paper_metadata(s2_papers_metadata: List[Dict]|Dict):
+    """reset id and keys for paper metadata"""
+    if isinstance(s2_papers_metadata, dict):
+        s2_papers_metadata = [s2_papers_metadata]
 
     s2_papers_dict = []
-    for item in s2_papers:
+    for item in s2_papers_metadata:
         # set up paper id
         s2_paper_id = item.get('paperId')
         
@@ -58,8 +60,8 @@ def align_paper_metadata(s2_papers: List[Dict]|Dict):
     return s2_papers_dict
             
 
-def review_and_filter_paper(
-    s2_papers: List[Paper.Paper]|Paper.Paper,
+def filter_papers(
+    aligned_s2_papers: List[Dict]|Dict,  # paper data already process by align_paper_metadata
     from_dt: Optional[str] = None,   # filter publish dt no earlier than
     to_dt: Optional[str] = None,   # filter publish dt no late than
     fields_of_study: Optional[List[str]] = None,  # list of field of study
@@ -69,19 +71,17 @@ def review_and_filter_paper(
     # journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
 ):
     """filter paper metadata (from semantic scholar) based on given criteria"""
-    papers_dict = align_paper_metadata(s2_papers)
     review_result = {
-        'papers_filtered': {},  # k-v dict
-        'off_dt_range': {},
-        'off_fields_of_study': {},
-        'below_min_citation': {},
-        'off_author_scope': {},
-        'lack_abstract': {},
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(),
     }
 
     filter_fos_set = set(fields_of_study) if fields_of_study is not None else None
     filter_author_id_set = set(author_ids) if author_ids is not None else None
-    for item in papers_dict:
+
+    for item in aligned_s2_papers:
         paper_doi = item.get('doi')
         if paper_doi is None:
             continue
@@ -90,45 +90,36 @@ def review_and_filter_paper(
         paper_author_ids_set = set(x.get('authorId') for x in item.get('authors', []) if x.get('authorId') is not None)
         paper_fos_set = set(item.get('fieldsOfStudy', []))
         paper_citation_cnt = item.get('referenceCount', 0)
-        paper_abstract = item.get('abstract')
         
         # --- Filtering Logic ---
-        reject = False
         # exclude paper out of time scope
         if from_dt is not None and to_dt  is not None and (publish_dt < from_dt or publish_dt > to_dt):  
-            reject = True
-            review_result['off_dt_range'][paper_doi] = item
+            review_result['off_dt_range'].add(paper_doi)
         
         # exclude paper not in fields of study
         if filter_fos_set is not None and paper_fos_set is not None and not filter_fos_set.intersection(paper_fos_set): 
-            reject = True
-            review_result['off_fields_of_study'][paper_doi] = item
+            review_result['off_fields_of_study'].add(paper_doi)
 
         # exclude paper not meeting citation criteria
         if min_citation_cnt is not None and paper_citation_cnt < min_citation_cnt:   
-            reject = True
-            review_result['below_min_citation'][paper_doi] = item
+            review_result['below_min_citation'].add(paper_doi)
         
         # exclude paper not in author list
         if filter_author_id_set is not None and not filter_author_id_set.intersection(paper_author_ids_set):
-            reject = True
-            review_result['off_author_scope'][paper_doi] = item
-
-        if not reject:
-            review_result['papers_filtered'][paper_doi] = item
-
-        # --- Independent Abstract Check ---
-        # identify paper without abstract
-        if paper_abstract is None or len(paper_abstract) < 10:
-            review_result['lack_abstract'][paper_doi] = item
+            review_result['off_author_scope'].add(paper_doi)
 
     return review_result
 
 
-def process_paper_data(papers_filtered: List[Dict]|Dict):
+def process_paper_data(
+        s2_papers_metadata: List[Dict]|Dict,
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
+        ):
     """standardize paper metadata to better suit neo4j format
     Argss:
-        papers_filtered ([List[Dict]|Dict]): paper metadata that has been reset and filtered
+        s2_papers_metadata ([List[Dict]|Dict]): paper metadata that has been reset and filtered
     Returns:
         - the json has to be preprocessed to in format like:
                         [{'type': 'node',
@@ -142,24 +133,42 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
                         'properties': {'authorOrder': 1,
                         'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
     """
-    if isinstance(papers_filtered, dict):
-        papers_filtered = [papers_filtered]
+    # align ids and keys for paper metadata
+    aligned_papers_dict = align_paper_metadata(s2_papers_metadata)
 
-    # then process to standard json format
-    s2_paper_json = []
-    processed_node_ids = set() # set of node ids
-    processed_edge_tuples = set() # set of tuples for edge ids
+    # get paper filter results
+    exclusion_info = filter_papers(aligned_papers_dict, from_dt, to_dt, fields_of_study)
+    exc_dois = (exclusion_info['off_dt_range'] | exclusion_info['off_fields_of_study'] |
+                exclusion_info['below_min_citation'] | exclusion_info['off_author_scope'])
+
+    # Process into standard JSON format, separating included/excluded
+    inc_json, exc_json = [], []
+    # Use separate sets for deduplication within each list
+    inc_node_ids, exc_node_ids = set(), set()
+    inc_edge_tuples, exc_edge_tuples = set(), set()
     
-    for item in papers_filtered:
+    # Define paper properties to include (excluding 'authors')
+    paper_props = ['doi', 'title', 'abstract', 'year', 'publicationDate',
+                    'citationCount', 'referenceCount', 'influentialCitationCount', 'arxivId', 'arxivUrl',
+                    'isOpenAccess', 'openAccessPdf', 'version', 'paperId',
+                    'fieldsOfStudy'] # Add/remove as needed
+
+    for item in aligned_papers_dict:
         paper_doi = item.get('doi') 
         if paper_doi is None:
             continue 
 
+        if paper_doi in exc_dois:
+            s2_paper_json = exc_json
+            processed_node_ids = exc_node_ids
+            processed_edge_tuples = exc_edge_tuples
+        else:
+            s2_paper_json = inc_json
+            processed_node_ids = inc_node_ids
+            processed_edge_tuples = inc_edge_tuples
+
         # --- Process Paper Node ---
-        paper_props = ['doi', 'title', 'abstract', 'year', 'publicationDate',
-                        'citationCount', 'referenceCount', 'influentialCitationCount', 'arxivId', 'arxivUrl',
-                        'isOpenAccess', 'openAccessPdf', 'version', 'paperId',
-                        'fieldsOfStudy', 'authors'] # Add/remove as needed
+
         paper_properties = {k: v for k, v in item.items() if k in paper_props and v is not None}
         paper_node = {
             "type": "node",
@@ -177,11 +186,12 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
             author_id = author.get('authorId')
             if author_id is not None:
                 if author_id not in processed_node_ids:
+                    author_props = {k: v for k, v in author.items() if k in ['authorId', 'name'] and v is not None}
                     author_node = {
                         "type": "node",
-                        "id": author.get('authorId'),
+                        "id": author_id,
                         "labels": ["Author"],
-                        "properties": author}
+                        "properties": author_props}
                     s2_paper_json.append(author_node)
                     processed_node_ids.add(author_id)
             
@@ -189,28 +199,38 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
                 edge_tuple = (author_id, paper_doi, "WRITES")
                 if edge_tuple not in processed_edge_tuples:
                     author_order = idx + 1
-                    coauthors = remove_kth_element(authors, idx)   
                     author_paper_relationship = {
                         "type": "relationship",
                         "relationshipType": "WRITES",
                         "startNodeId": author_id,
                         "endNodeId": paper_doi,
-                        "properties": {'authorOrder': author_order, 'coauthors': coauthors}
+                        "properties": {'authorOrder': author_order}
                         }
                     s2_paper_json.append(author_paper_relationship)
                     processed_edge_tuples.add(edge_tuple)
 
         # --- Process Journal ---
         journal = item.get('journal', {})
-        journal_name = journal.get('name') if isinstance(journal, dict) else None
+
+        paper_in_journal_props = {}
+        if isinstance(journal, dict):
+            journal_name = journal.get('name')  
+            paper_in_journal_props['volume'] = journal.get('volume')
+            paper_in_journal_props['pages'] = journal.get('pages')
+            # Filter None values from properties
+            paper_in_journal_props = {k:v for k,v in paper_in_journal_props.items() if v is not None}
+        else:
+            journal_name = None
+
         if journal_name is not None:
             journal_hash_id = generate_hash_key(journal_name)
             if journal_hash_id not in processed_node_ids:
+                journal_props = {"journal_hash_id": journal_hash_id, "name": journal_name, "hash_method":"hashlib.sha256"}
                 journal_node = {
                     "type": "node",
                     "id": journal_hash_id,
                     "labels": ["Journal"],
-                    "properties": {"journal_hash_id": journal_hash_id, "name": journal_name, "hash_method":"hashlib.sha256"}}
+                    "properties": journal_props}
                 s2_paper_json.append(journal_node)
                 processed_node_ids.add(journal_hash_id)
             
@@ -223,20 +243,22 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
                         "relationshipType": "PRINTS_ON",
                         "startNodeId": paper_doi,
                         "endNodeId": journal_hash_id,
-                        "properties": {}}
+                        "properties": paper_in_journal_props}
                     s2_paper_json.append(paper_journal_relationship)
                     processed_edge_tuples.add(edge_tuple)
 
         # --- Process Venue ---
         venue = item.get('publicationVenue', {})
         venue_id = venue.get('id') if isinstance(venue, dict) else None
+        venue_name = venue.get('name', '') if isinstance(venue, dict) else ''
         if venue_id is not None:
             if venue_id not in processed_node_ids:
+                venue_props = {k: v for k, v in venue.items() if k in ['id', 'name', 'type', 'url'] and v is not None}
                 venue_node = {
                     "type": "node",
                     "id": venue_id,
                     "labels": ["Venue"],
-                    "properties": venue
+                    "properties": venue_props
                     }
                 s2_paper_json.append(venue_node)
                 processed_node_ids.add(venue_id)
@@ -244,7 +266,7 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
             # process paper -> RELEASES_IN -> venue
             edge_tuple = (paper_doi, venue_id, "RELEASES_IN")
             if edge_tuple not in processed_edge_tuples:
-                if 'arxiv' not in venue.get('name', '').lower():  # exclude arxiv from venue
+                if 'arxiv' not in venue_name.lower():  # exclude arxiv from venue
                     paper_venue_relationship = {
                         "type": "relationship",
                         "relationshipType": "RELEASES_IN",
@@ -254,18 +276,17 @@ def process_paper_data(papers_filtered: List[Dict]|Dict):
                     s2_paper_json.append(paper_venue_relationship)
                     processed_edge_tuples.add(edge_tuple)
 
-    return s2_paper_json
+    processed_result = {'include': inc_json,
+                        'exclude': exc_json,
+                        'exclusion_info':exclusion_info}
+    return processed_result
 
 
 def process_author_data(
         s2_authors: List[Dict]|Dict,
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields_of_study: Optional[List[str]] = None,  # list of field of study
-        # min_citation_cnt: Optional[int] = 0,  # citation count no less than
-        # institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
-        # journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
-        # author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+        fields_of_study: Optional[List[str]] = None,  # list of field of study   
     ):
     """standardize author metadata to better suit neo4j format
     Argss:
@@ -286,90 +307,135 @@ def process_author_data(
     if isinstance(s2_authors, dict):
         s2_authors = [s2_authors]
 
-    s2_author_json = []
-    processed_node_ids = set() # set of node ids
-    processed_edge_tuples = set() # set of tuples for edge ids
+    # Final accumulators for the entire batch of authors
+    final_inc_json, final_exc_json = [], []
+    final_inc_node_ids, final_exc_node_ids = set(), set()
+    final_inc_edge_tuples, final_exc_edge_tuples = set(), set()
 
-    for item in s2_authors:
-        author_id = item.get('authorId')
-        if author_id is not None:
+    # Accumulator for exclusion reasons across all processed papers for all authors
+    aggregated_exclusion_info = {
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(), 
+    }
+
+    # --- Define properties to keep for Author nodes ---
+    author_props_to_keep = [
+        'authorId', 'name', 'aliases', 'url', 'hIndex',
+        'paperCount', 'citationCount', # Add other relevant author fields
+    ]
+    # --- Define properties to keep for Institution nodes ---
+    inst_props_to_keep = ['institution_hash_id', 'name', 'hash_method']
+
+    for author_item in s2_authors:
+        author_id = author_item.get('authorId')
+        if author_id is None:
             continue
-        
-        author_id = item.get('authorId')
-        if author_id is not None:
-            # process author metadata
-            author_node = {
-                        "type": "node",
-                        "id": author_id,
-                        "labels": ["Author"],
-                        "properties": remove_key_values(item, 'papers')}
-            s2_author_json.append(author_node)
-            processed_node_ids.add(author_id) 
 
-            # --- Process Affiliations ---
-            # process institution metadata
-            affiliations = item.get('affiliations', [])
-            if isinstance(affiliations, list) and len(affiliations) > 0:
-                for inst in affiliations:
-                    inst_hash_id = generate_hash_key(inst)
-                    if inst_hash_id not in processed_node_ids:
+        # --- 1. Process Author Node ---
+        # Add Author node to the include list if not already present
+        author_props = {
+                k: v for k, v in author_item.items()
+                if k in author_props_to_keep and v is not None
+            }
+        # Ensure essential props are present
+        if 'authorId' not in author_props: author_props['authorId'] = author_id
+        if 'name' not in author_props: author_props['name'] = author_item.get('name', 'Unknown Name') # Add default if missing
+        author_node = {
+                    "type": "node",
+                    "id": author_id,
+                    "labels": ["Author"],
+                    "properties": author_props}
+        final_inc_json.append(author_node)
+        final_inc_node_ids.add(author_id) 
+
+        # --- 2. Process Affiliations (Institutions and WORKS_IN) ---
+        # process institution metadata
+        institutions = author_item.get('affiliations', [])
+        if isinstance(institutions, list):
+            for inst_data in institutions:
+                inst_name = None
+                if isinstance(inst_data, str):
+                    inst_name = inst_data
+                elif isinstance(inst_data, dict):
+                    inst_name = inst_data.get('name', inst_data.get('institution'))
+
+                if inst_name and inst_name.strip(): # Check if name is valid
+                    inst_hash_id = generate_hash_key(inst_name)
+                    if inst_hash_id not in final_inc_node_ids:
+                        inst_props = {
+                            'institution_hash_id': inst_hash_id,
+                            'name': inst_name,
+                            'hash_method': 'hashlib.sha256'
+                            }
                         inst_node = {
-                                    "type": "node",
-                                    "id": inst_hash_id,
-                                    "labels": ["Affiliation"],
-                                    "properties":  {'affiliation_hash_id': inst_hash_id, 'affiliation_name': inst, 'hash_method': 'hashlib.sha256'}}
-                        s2_author_json.append(inst_node)  
-                        processed_node_ids.add(inst_hash_id)   
+                            "type": "node",
+                            "id": inst_hash_id,
+                            "labels": ["Institution"],
+                            "properties": inst_props}
+                        final_inc_json.append(inst_node)
+                        final_inc_node_ids.add(inst_hash_id)
 
                     # process author -> WORKS_IN -> affiliations
                     edge_tuple = (author_id, inst_hash_id, "WORKS_IN")
-                    if edge_tuple not in processed_edge_tuples:
+                    if edge_tuple not in final_inc_edge_tuples:
                         author_inst_relationship = {
                             "type": "relationship",
                             "relationshipType": "WORKS_IN",
                             "startNodeId": author_id,
                             "endNodeId": inst_hash_id,
-                            "properties": {}}
-                        s2_author_json.append(author_inst_relationship)
-                        processed_edge_tuples.add(edge_tuple)
+                            "properties": {} 
+                        }
+                        final_inc_json.append(author_inst_relationship)
+                        final_inc_edge_tuples.add(edge_tuple)
 
-            # --- Process Paper ---
-            # process all paper metadata
-            s2_papers = item.get('papers', [])
-            if isinstance(s2_papers, list) is not None and len(s2_papers) > 0:
-                review_result = review_and_filter_paper(
-                            s2_papers=s2_papers,
-                            from_dt=from_dt, 
-                            to_dt=to_dt, 
-                            fields_of_study=fields_of_study)
-                papers_filtered = list(review_result.get('papers_filtered').values())
-                
-                s2_paper_json = process_paper_data(papers_filtered=papers_filtered)
+        # --- 3. Process Associated Papers ---
+        s2_papers = author_item.get('papers', [])
+        if isinstance(s2_papers, list) and len(s2_papers) > 0:
+            papers_processed = process_paper_data(s2_papers, from_dt, to_dt, fields_of_study)
+            for item in papers_processed['include']:
+                if item['type'] == 'node' and item['id'] not in final_inc_node_ids:
+                    final_inc_json.append(item)
+                    final_inc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in final_inc_edge_tuples:
+                        final_inc_json.append(item)
+                        final_inc_edge_tuples.add(edge_tuple)
+            
+            for item in papers_processed['exclude']:
+                if item['type'] == 'node' and item['id'] not in final_exc_node_ids:
+                    final_exc_json.append(item)
+                    final_exc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in final_exc_edge_tuples:
+                        final_exc_json.append(item)
+                        final_exc_edge_tuples.add(edge_tuple)
 
-                for x in s2_paper_json:
-                    if x['type'] == "node" and x['id'] not in processed_node_ids:
-                        s2_author_json.append(x)
-                        processed_node_ids.add(x['id'])
-                    elif x['type'] == "relationship":
-                        edge_tuple = (x['startNodeId'], x['endNodeId'], x['relationshipType'])
-                        if edge_tuple not in processed_edge_tuples:
-                            s2_author_json.append(x)
-                            processed_edge_tuples.add(edge_tuple)
+            # Aggregate exclusion information from this batch of papers
+            current_exclusion_reasons = papers_processed['exclusion_info']
+            for reason, doi_set in current_exclusion_reasons.items():
+                if reason in aggregated_exclusion_info:
+                    aggregated_exclusion_info[reason].update(doi_set)
 
-    return s2_author_json
+    processed_result = {
+        'include': final_inc_json,
+        'exclude': final_exc_json,
+        'exclusion_info': aggregated_exclusion_info
+    }
+
+    return processed_result
 
 
-def process_citation_metadata(
+def process_citation_data(
         original_paper_doi: str,
-        s2_citation_metadata: List[Dict]|Dict,
+        s2_citations: List[Dict]|Dict,
         citation_type: Literal['citingPaper','citedPaper'],
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields_of_study: Optional[List[str]] = None,  # list of field of study
-        min_citation_cnt: Optional[int] = None,  # citation count no less than
-        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
-        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
-        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+        fields_of_study: Optional[List[str]] = None,  # list of field of study    
         ):
     """standardize paper citation relationships to better suit neo4j format
     Argss:
@@ -387,125 +453,213 @@ def process_citation_metadata(
                         'properties': {'authorOrder': 1,
                         'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
     """
-    s2_citationmeta_json = []
-
     # for citations (citing or cited papers)
-    if isinstance(s2_citation_metadata, dict):
-        s2_citation_metadata = [s2_citation_metadata] 
-    
-    for item in s2_citation_metadata:
-        existing_node_ids = [x['id'] for x in s2_citationmeta_json if x['type']=='node']
-        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_citationmeta_json if x['type']=='relationship']
+    if isinstance(s2_citations, dict):
+        s2_citations = [s2_citations] 
 
-        s2_paper_metadata = item.get(citation_type)  # get either citing or cited paper metadata
+    # Accumulators for the final result
+    final_inc_json, final_exc_json = [], []
+    final_inc_node_ids, final_exc_node_ids = set(), set()
+    final_inc_edge_tuples, final_exc_edge_tuples = set(), set()
+
+    # Accumulator for exclusion reasons across all processed citations
+    aggregated_exclusion_info = {
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(),
+    }
+
+    # Key for citation properties within the citation record item
+    citation_props_keys = ['isInfluential', 'contexts', 'intents', 'contextsWithIntent']
+
+    for citation_item in s2_citations:
+        # 1. Extract raw metadata for the citation paper
+        s2_papers = citation_item.get(citation_type)  # get either citing or cited paper metadata
+        if not isinstance(s2_papers, dict):
+            continue
+
+        # 2. Align the citation paper's metadata to get its canonical DOI
+        aligned_list = align_paper_metadata(s2_papers)
+        if not aligned_list:
+            continue
+        citation_paper_aligned = aligned_list[0]
+        citation_paper_doi = citation_paper_aligned.get('doi')
+        if citation_paper_doi is None:
+            continue
         
-        # convert paper metadata to json
-        filtered_s2_paper_metadata = reset_and_filter_paper(
-            s2_paper_metadata=s2_paper_metadata,
-            from_dt=from_dt, 
-            to_dt=to_dt, 
-            fields_of_study=fields_of_study)
-        s2_papermeta_json = process_paper_metadata(filtered_s2_paper_metadata)
+        # Avoid processing self-citations directly (can happen in API results)
+        if citation_paper_doi == original_paper_doi:
+            continue
+    
+        # 3. Process the citation paper (using its raw metadata as process_paper_data handles alignment)
+        #    This applies filters and generates Neo4j JSON for this single paper.
+        papers_processed = process_paper_data(s2_papers, from_dt, to_dt, fields_of_study)
 
-        for x in s2_papermeta_json:
-            if x['type'] == "node" and x['id'] not in existing_node_ids:
-                s2_citationmeta_json.append(x)
-            elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
-                s2_citationmeta_json.append(x)
+        # 4. Determine if the *other* paper was excluded by the filters
+        #    Check if its DOI appears in any exclusion set from its processing run.
+        current_exclusion_reasons = papers_processed['exclusion_info']
+        is_excluded = any(citation_paper_doi in reason_set for reason_set in current_exclusion_reasons.values())
 
-        target_paper_doi = filtered_s2_paper_metadata[0].get('doi') if isinstance(filtered_s2_paper_metadata, list) and len(filtered_s2_paper_metadata) > 0 else None
-        if target_paper_doi is not None:
-            if citation_type == 'citedPaper':  # source paper citing target papers
+        # 5. Merge results and potentially create CITES relationship
+        if not is_excluded:
+            # Merge included data into final results, handling duplicates
+            for item in papers_processed['include']:
+                if item['type'] == 'node':
+                    if item['id'] not in final_inc_node_ids:
+                        final_inc_json.append(item)
+                        final_inc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in final_inc_edge_tuples:
+                        final_inc_json.append(item)
+                        final_inc_edge_tuples.add(edge_tuple)
+
+            # Create the CITES relationship since the target paper is included
+            if citation_type == 'citedPaper':  # original paper -> CITES -> other paper
                 start_node_id = original_paper_doi
-                end_node_id = target_paper_doi
-            else:  # source paper cited by target papers
-                start_node_id = target_paper_doi
-                end_node_id = original_paper_doi 
+                end_node_id = citation_paper_doi
+            else:  # other paper -> CITES -> original paper
+                start_node_id = citation_paper_doi
+                end_node_id = original_paper_doi
 
-            # append relationship
-            if (start_node_id, end_node_id) not in existing_edge_ids:
-                properties = filter_and_reorder_dict(item, ['isInfluential', 'contexts', 'intents', 'contextsWithIntent'])
+            # append paper -> CITES -> paper relationship
+            edge_tuple = (start_node_id, end_node_id, 'CITES')
+            if edge_tuple not in final_inc_edge_tuples:
+                cites_properties = filter_and_reorder_dict(citation_item, citation_props_keys)
                 paper_cites_relationship = {
                     "type": "relationship",
                     "relationshipType": "CITES",
                     "startNodeId": start_node_id,
                     "endNodeId": end_node_id,
-                    "properties": properties}
-                s2_citationmeta_json.append(paper_cites_relationship)
+                    "properties": cites_properties}
+                final_inc_json.append(paper_cites_relationship)
+                final_inc_edge_tuples.add(edge_tuple)
+        else:
+            # Merge excluded data into final results, handling duplicates
+            for item in papers_processed['exclude']:
+                if item['type'] == 'node':
+                    if item['id'] not in final_exc_node_ids:
+                        final_exc_json.append(item)
+                        final_exc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in final_exc_edge_tuples:
+                        final_exc_json.append(item)
+                        final_exc_edge_tuples.add(edge_tuple)
 
-    return s2_citationmeta_json
+        # 6. Aggregate exclusion information regardless of include/exclude status
+        for reason, doi_set in current_exclusion_reasons.items():
+            if reason in aggregated_exclusion_info:
+                aggregated_exclusion_info[reason].update(doi_set)
+
+    # 7. Assemble final result
+    processed_result = {
+        'include': final_inc_json,
+        'exclude': final_exc_json,
+        'exclusion_info': aggregated_exclusion_info
+    }
+
+    return processed_result
     
 
 def process_related_metadata(
-        s2_related_metadata: List[Dict]|Dict,
+        s2_related_papers: List[Dict]|Dict,
         topic: Optional[str] = None,
         from_dt: Optional[str] = None,   # filter publish dt no earlier than
         to_dt: Optional[str] = None,   # filter publish dt no late than
-        fields_of_study: Optional[List[str]] = None,  # list of field of study
-        min_citation_cnt: Optional[int] = 0,  # citation count no less than
-        institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
-        journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
-        author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids      
+        fields_of_study: Optional[List[str]] = None,  # list of field of study    
     ):
-    """standardize paper citation relationships to better suit neo4j format
-    Argss:
-        s2_related_metadata ([List[Dict]|Dict]): related papers metadata
-        properties (dict): more information on "RELATES" information
-    Returns:
-        - the json has to be preprocessed to in format like:
-                        [{'type': 'node',
-                        'id': '2345003971',
-                        'labels': ['Author'],
-                        'properties': {'authorId': '2345003971', 'name': 'Mark Schone'}},
-                        {'type': 'relationship',
-                        'relationshipType': 'WRITES',
-                        'startNodeId': '2345003971',
-                        'endNodeId': '10.48550/arXiv.2502.07827',
-                        'properties': {'authorOrder': 1,
-                        'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
-    """
-    s2_relatedmeta_json = []
+    """standardize paper citation relationships to better suit neo4j format """
+    if isinstance(s2_related_papers, dict):
+        s2_related_papers = [s2_related_papers]
 
-    # for related papers
-    if isinstance(s2_related_metadata, dict):
-        s2_related_metadata = [s2_related_metadata]
+    # Final accumulators for the entire batch of authors
+    final_inc_json, final_exc_json = [], []
+    final_inc_node_ids, final_exc_node_ids = set(), set()
+    final_inc_edge_tuples, final_exc_edge_tuples = set(), set()
+
+    # Accumulator for exclusion reasons across all processed papers for all authors
+    aggregated_exclusion_info = {
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(), # Note: 'off_author_scope' might be less relevant here
+                                   # unless filtering papers based on co-authors.
+    }
     
-    for paper_metadata in s2_related_metadata:
-        existing_node_ids = [x['id'] for x in s2_relatedmeta_json if x['type']=='node']
-        existing_edge_ids = [(x['startNodeId'],x['endNodeId'])  for x in s2_relatedmeta_json if x['type']=='relationship']
+    for paper in s2_related_papers:
+        # 1. Extract raw metadata for the related paper
+        if not isinstance(paper, dict):
+            continue
 
-        # convert paper metadata to json
-        filtered_s2_paper_metadata = reset_and_filter_paper(
-            s2_paper_metadata=paper_metadata,
-            from_dt=from_dt, 
-            to_dt=to_dt, 
-            fields_of_study=fields_of_study)
-        s2_papermeta_json = process_paper_metadata(filtered_s2_paper_metadata)
-        for x in s2_papermeta_json:
-            if x['type'] == "node" and x['id'] not in existing_node_ids:
-                s2_relatedmeta_json.append(x)
-            elif x['type'] == "relationship" and (x['startNodeId'], x['endNodeId']) not in existing_edge_ids:
-                s2_relatedmeta_json.append(x)
+        # 2. Align the related paper's metadata to get its canonical DOI
+        aligned_list = align_paper_metadata(paper)
+        if not aligned_list:
+            continue
+        paper_aligned = aligned_list[0]
+        paper_doi = paper_aligned.get('doi')
+        if paper_doi is None:
+            continue
 
-        target_paper_doi = filtered_s2_paper_metadata[0].get('doi') if isinstance(filtered_s2_paper_metadata, list) and len(filtered_s2_paper_metadata) > 0 else None
-        if target_paper_doi is not None:
+        # 3. add topic node and paper -> DISCUSS -> topic relationship
+        if paper_doi is not None:
             if topic:
                 topic_hash_id = generate_hash_key(topic)
-                if topic_hash_id not in existing_node_ids:
+                if topic_hash_id not in final_inc_node_ids:
+                    topic_props = {'topic_hash_id': topic_hash_id, 'topic_name': topic, 'hash_method': 'hashlib.sha256'}
                     topic_node = {
                         'type': 'node',
                         'id': topic_hash_id,
                         'labels': ['Topic'],
-                        'properties': {'topic_hash_id': topic_hash_id, 'topic_name': topic, 'hash_method': 'hashlib.sha256'}}
-                    s2_relatedmeta_json.append(topic_node)
+                        'properties': topic_props}
+                    final_inc_json.append(topic_node)
+                    final_inc_node_ids.add(topic_hash_id)
 
-                if (target_paper_doi, topic_hash_id) not in existing_edge_ids:
+                edge_tuple = (paper_doi, topic_hash_id, "DISCUSS")
+                if edge_tuple not in final_inc_edge_tuples:
                     paper_topic_relationship = {
                         "type": "relationship",
                         "relationshipType": "DISCUSS",
-                        "startNodeId": target_paper_doi,
+                        "startNodeId": paper_doi,
                         "endNodeId": topic_hash_id,
                         "properties": {}}
-                    s2_relatedmeta_json.append(paper_topic_relationship)
-                    
-    return s2_relatedmeta_json
+                    final_inc_json.append(paper_topic_relationship)
+                    final_exc_edge_tuples.add(edge_tuple)
+
+        # 3. Process related paper and convert to neo4j format json.
+        papers_processed = process_paper_data(paper, from_dt, to_dt, fields_of_study)
+        for item in papers_processed['include']:
+            if item['type'] == 'node' and item['id'] not in final_inc_node_ids:
+                final_inc_json.append(item)
+                final_inc_node_ids.add(item['id'])
+            elif item['type'] == 'relationship':
+                edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                if edge_tuple not in final_inc_edge_tuples:
+                    final_inc_json.append(item)
+                    final_inc_edge_tuples.add(edge_tuple)
+        
+        for item in papers_processed['exclude']:
+            if item['type'] == 'node' and item['id'] not in final_exc_node_ids:
+                final_exc_json.append(item)
+                final_exc_node_ids.add(item['id'])
+            elif item['type'] == 'relationship':
+                edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                if edge_tuple not in final_exc_edge_tuples:
+                    final_exc_json.append(item)
+                    final_exc_edge_tuples.add(edge_tuple)
+
+        # Aggregate exclusion information from this batch of papers
+        current_exclusion_reasons = papers_processed['exclusion_info']
+        for reason, doi_set in current_exclusion_reasons.items():
+            if reason in aggregated_exclusion_info:
+                aggregated_exclusion_info[reason].update(doi_set)
+
+    # --- 4. Assemble final result ---
+    processed_result = {
+        'include': final_inc_json,
+        'exclude': final_exc_json,
+        'exclusion_info': aggregated_exclusion_info
+    }
+
+    return processed_result

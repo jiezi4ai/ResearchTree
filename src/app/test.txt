@@ -1,347 +1,404 @@
-以下代码尝试检索文献相关的数据，请帮助完成以下任务：
-1. 检查代码是否存在显著错误，如有，请逐个说明；
-2. 请检查consolidated_search能否正常调度，说明是否有优化和提升效率的方法；
-3. 备注其它的可优化项。
+编写函数处理semantic scholar (s2)的元数据。
+其中函数align_paper_metadata修订元数据中的键值；
+函数filter_papers对元数据进行过滤；
+函数process_paper_data将paper元数据转换为neo4j兼容的json格式。
+
+具体实现代码如下：
 
 
 ```python
-import asyncio
-from typing import List, Dict, Optional, Union # Added Tuple
+import re
+from typing import Optional, List, Dict, Literal
 
-import sys
-import os
+from utils.data_process import generate_hash_key, remove_kth_element, remove_key_values, filter_and_reorder_dict
 
-parent_dir = os.path.dirname(os.getcwd())
-sys.path.append(parent_dir)
+def align_paper_metadata(s2_papers_metadata: List[Dict]|Dict):
+    """reset id and keys for paper metadata"""
+    if isinstance(s2_papers_metadata, dict):
+        s2_papers_metadata = [s2_papers_metadata]
 
-from collect.paper_query import PaperQuery
-from collect.citation_query import CitationQuery
-from collect.author_query import AuthorQuery
-from collect.paper_recommendation import PaperRecommendation
+    s2_papers_dict = []
+    for item in s2_papers_metadata:
+        # set up paper id
+        s2_paper_id = item.get('paperId')
+        
+        if s2_paper_id is not None:
+            doi = item.get('externalIds',{}).get('DOI')  # doi
+            arxiv_id = item.get('externalIds',{}).get('ArXiv')  # arxiv id
 
-import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+            if doi is not None and doi.startswith('10.48550/arXiv.') and arxiv_id is None:
+                arxiv_id = doi
 
+            arxiv_id_rvsd = None
+            if arxiv_id is not None:
+                arxiv_no = arxiv_id.replace('10.48550/arXiv.', '')   # get rid of doi prefix
+                arxiv_id_rvsd = re.sub(r'v\d+$', '', arxiv_no)   # get rid of version info
+                version_match = re.search(r'v\d+$', arxiv_no)  # get version info
+                # generate arxiv related info
+                item['version'] = version_match.group(0) if version_match else ""
+                item['arxivUrl'] = f"https://arxiv.org/abs/{arxiv_no}"
+                item['isOpenAccess'] = True
+                item['openAccessPdf'] = f"https://arxiv.org/pdf/{arxiv_no}"
+                item['arxivId'] = arxiv_id_rvsd
 
-class PaperSearch:
-    """
-    A class for exploring academic papers using Semantic Scholar API and LLMs,
-    optimized for asynchronous operations.
-    """
-    def __init__(
-            self,
-            seed_research_topics: Optional[List] = None,
-            seed_paper_titles: Optional[Union[List[str], str]] = None,
-            seed_paper_dois: Optional[Union[List[str], str]] = None,
-            from_dt: Optional[str] = None,
-            to_dt: Optional[str] = None,
-            fields_of_study: Optional[List[str]] = None,
-            nodes_json: Optional[List[Dict]] = None,
-            edges_json: Optional[List[Dict]] = None, 
-            search_limit: Optional[int] = 50,
-            recommend_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100
-    ):
-        """
-        Initialize PaperExploration parameters.
-        (Args documentation omitted for brevity, same as original)
-        """
-        # seed papers info
-        self.research_topics = seed_research_topics
-        self.seed_paper_titles = [seed_paper_titles] if isinstance(seed_paper_titles, str) and seed_paper_titles else seed_paper_titles if isinstance(seed_paper_titles, list) else []
-        self.seed_paper_dois = [seed_paper_dois] if isinstance(seed_paper_dois, str) and seed_paper_dois else seed_paper_dois if isinstance(seed_paper_dois, list) else []
+            if doi is None:
+                if arxiv_id_rvsd is not None:
+                    doi = f"10.48550/arXiv.{arxiv_id_rvsd}"  # assign 10.48550/arXiv. for arxiv id https://info.arxiv.org/help/doi.html
+                else:
+                    doi = s2_paper_id
+            item['doi'] = doi
 
-        self.search_limit = search_limit
-        self.recommend_limit = recommend_limit
-        self.citation_limit = citation_limit
+            # process publish date
+            publish_dt = item.get('publicationDate')
+            year = item.get('year')
+            if publish_dt is None:
+                if arxiv_id_rvsd is not None:
+                    item['publicationDate'] = f"20{arxiv_id_rvsd[:2]}-{arxiv_id_rvsd[2:4]}-01"
+                elif year is not None:
+                    item['publicationDate'] = f"{year}-01-01"
+                else:
+                    item['publicationDate'] = '2000-01-01'
 
-        # Filters
-        self.from_dt = from_dt
-        self.to_dt = to_dt
-        self.fields_of_study = fields_of_study
+            # cut down author information
+            item['authors'] = item.get('authors', [])[0:10]
 
-        # State: Nodes and Edges
-        self.nodes_json = []
-        if isinstance(nodes_json, list) and len(nodes_json) > 0:
-            self._add_items_json(nodes_json)
+            s2_papers_dict.append(item)
+    return s2_papers_dict
             
-        self.edges_json = []
-        if isinstance(edges_json, list) and len(edges_json) > 0:
-            self._add_items_json(edges_json)
 
-        # store paper abstraction embeddings
-        self.abs_embed_ref = {}
+def filter_papers(
+    aligned_s2_papers: List[Dict]|Dict,  # paper data already process by align_paper_metadata
+    from_dt: Optional[str] = None,   # filter publish dt no earlier than
+    to_dt: Optional[str] = None,   # filter publish dt no late than
+    fields_of_study: Optional[List[str]] = None,  # list of field of study
+    min_citation_cnt: Optional[int] = 0,  # citation count no less than
+    author_ids: Optional[List[str]] = None,  # restrcted to list of authors' ids
+    # institutions: Optional[List[str]] = None,  # restrcted to list of institutions, to be implemented
+    # journals: Optional[List[str]] = None,  # restrcted to list of journals, to be implemented
+):
+    """filter paper metadata (from semantic scholar) based on given criteria"""
+    review_result = {
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(),
+    }
 
-        # explored nodes
-        self.seeds = {'paper':[], 'author':[]} # seed papers and authors
-        self.explored_nodes = {'topic':[],   # topic explored
-                               'author':[],   # authors explored 
-                               'reference':[],  # papers with reference explored
-                               'citing': [],  # papers with citation explored
-                               'title': [],  # papers with title search
-                               'paper':[], # papers with doi search
-                               'recommendation':[],  # papers for recommendations, format like ([pos_paper_dois], [neg_paper_dois])
-                                }
+    filter_fos_set = set(fields_of_study) if fields_of_study is not None else None
+    filter_author_id_set = set(author_ids) if author_ids is not None else None
 
+    for item in aligned_s2_papers:
+        paper_doi = item.get('doi')
+        if paper_doi is None:
+            continue
 
-    ############################################################################
-    # basic function
-    ############################################################################
-    def _add_items_json(
-            self, 
-            items: List[Dict], 
-            source: Optional[str]=None):
-        """Adds nodes and relationships from processed data, remove duplications
-        Args:
-            items: node json or edge json
-            round / source: indicating from which iteration the node or edge was created.
-                            round and source help to track the dynamics of the data generation
-        """
-        _node_ids = set()
-        for x in self.nodes_json:
-            # for author and paper, avoid duplication if there is complete information
-            if x['labels'][0] in ['Author', 'Paper']:
-                if x.get('properties', {}).get('is_complete', False) == True:
-                    _node_ids.add(x['id'])
-            # for others, just avoid duplication
-            else:
-                _node_ids.add(x['id'])
-        _edge_tuples = set([(x['startNodeId'], x['endNodeId'], x['relationshipType']) 
-                            for x in self.edges_json]) # Store (start_id, end_id, type) tuples
+        publish_dt = item.get('publicationDate')
+        paper_author_ids_set = set(x.get('authorId') for x in item.get('authors', []) if x.get('authorId') is not None)
+        paper_fos_set = set(item.get('fieldsOfStudy', []))
+        paper_citation_cnt = item.get('referenceCount', 0)
         
-        for item in items:
-            if item['type'] == 'node':
-                node_id = item['id']
-                if node_id not in _node_ids:
-                    item['dataGeneration'] = {'source': source}
-                    self.nodes_json.append(item)
-                    if item['labels'][0] in ['Author', 'Paper']:
-                        if item.get('properties', {}).get('is_complete', False) == True:
-                            _node_ids.add(item['id'])
-                    else:
-                        _node_ids.add(item['id'])
-
-            elif item['type'] == 'relationship':
-                rel_type = item['relationshipType']
-                start_id = item['startNodeId']
-                end_id = item['endNodeId']
-                edge_tuple = (start_id, end_id, rel_type) 
-                if edge_tuple not in _edge_tuples:
-                    item['dataGeneration'] = {'source': source}
-                    self.edges_json.append(item)
-                    _edge_tuples.add(edge_tuple)
-
- 
-    ############################################################################
-    # paper collection functions
-    ############################################################################
-    async def paper_search(
-            self,
-            # for paper info
-            topics: Optional[List]=[],
-            paper_titles: Optional[List]=[],
-            paper_dois: Optional[List]=[],
-            # search params
-            search_limit: Optional[int] = 50,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
-        ):
-        """basic search for seed paper related information"""
-        topics = [x for x in topics if x not in self.explored_nodes['topic']]
-        paper_titles = [x for x in paper_titles if x not in self.explored_nodes['title']]
-        paper_dois = [x for x in paper_titles if x not in self.explored_nodes['paper']]
-
-        if len(topics) > 0 or len(paper_titles) > 0 or len(paper_dois) > 0:
-            logging.info(f"Search {len(topics)} topics, {len(paper_titles)} paper titles and {len(paper_dois)} for paper information.")
-            pq = PaperQuery()
-            papers_json = await pq.get_paper_info(
-                research_topics=topics, 
-                seed_paper_titles=paper_titles,
-                seed_paper_dois=paper_dois,
-                limit=search_limit, 
-                from_dt=from_dt, 
-                to_dt=to_dt,
-                fields_of_study=fields_of_study)
+        # --- Filtering Logic ---
+        # exclude paper out of time scope
+        if from_dt is not None and to_dt  is not None and (publish_dt < from_dt or publish_dt > to_dt):  
+            review_result['off_dt_range'].add(paper_doi)
         
-        # add item as json
-        self._add_items_json(papers_json, source='paper_search')
-        logging.info(f"After paper search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+        # exclude paper not in fields of study
+        if filter_fos_set is not None and paper_fos_set is not None and not filter_fos_set.intersection(paper_fos_set): 
+            review_result['off_fields_of_study'].add(paper_doi)
 
-        # update explored nodes
-        if len(topics) > 0:
-            self.explored_nodes['topic'].extend(topics)
-        if len(paper_titles) > 0:
-            self.explored_nodes['title'].extend(paper_titles) 
-        if len(paper_dois) > 0:
-            self.explored_nodes['paper'].extend(paper_dois) 
-
-
-    async def author_search(
-            self,
-            # for author info
-            author_ids: Optional[List]=[],
-            # search params
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
-        ):
-        """basic search for author related information"""
-        author_ids = [x for x in author_ids if x not in self.explored_nodes['author']]
-
-        if len(author_ids) > 0:
-            logging.info(f"Search {len(author_ids)} author information.")
-            aq = AuthorQuery()
-            author_json = await aq.get_author_info(author_ids, from_dt, to_dt, fields_of_study)
+        # exclude paper not meeting citation criteria
+        if min_citation_cnt is not None and paper_citation_cnt < min_citation_cnt:   
+            review_result['below_min_citation'].add(paper_doi)
         
-        # add item as json
-        self._add_items_json(author_json, source='author_search')
-        logging.info(f"After author search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+        # exclude paper not in author list
+        if filter_author_id_set is not None and not filter_author_id_set.intersection(paper_author_ids_set):
+            review_result['off_author_scope'].add(paper_doi)
 
-        # update explored nodes
-        if len(author_ids) > 0:
-            self.explored_nodes['author'].extend(author_ids)
+    return review_result
 
 
-    async def citation_search(
-            self,
-            # for citation info
-            ref_paper_dois: Optional[List]=[],
-            citing_paper_dois: Optional[List]=[],
-            # search params
-            citation_limit: Optional[int] = 100,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
+def process_paper_data(
+        s2_papers_metadata: List[Dict]|Dict,
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        fields_of_study: Optional[List[str]] = None,  # list of field of study
         ):
-        """citation search for reference / citing information"""
-        ref_paper_dois = [x for x in ref_paper_dois if x not in self.explored_nodes['reference']]
-        citing_paper_dois = [x for x in citing_paper_dois if x not in self.explored_nodes['citing']]
+    """standardize paper metadata to better suit neo4j format
+    Argss:
+        s2_papers_metadata ([List[Dict]|Dict]): paper metadata that has been reset and filtered
+    Returns:
+        - the json has to be preprocessed to in format like:
+                        [{'type': 'node',
+                        'id': '2345003971',
+                        'labels': ['Author'],
+                        'properties': {'authorId': '2345003971', 'name': 'Mark Schone'}},
+                        {'type': 'relationship',
+                        'relationshipType': 'WRITES',
+                        'startNodeId': '2345003971',
+                        'endNodeId': '10.48550/arXiv.2502.07827',
+                        'properties': {'authorOrder': 1,
+                        'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
+    """
+    # align ids and keys for paper metadata
+    aligned_papers_dict = align_paper_metadata(s2_papers_metadata)
 
-        # setup tasks
-        logging.info(f"Preparing reference for {len(ref_paper_dois)} papers and citing for {len(citing_paper_dois)} papers.")
-        tasks = []
-        cq = CitationQuery()
-        for paper_doi in ref_paper_dois:
-            tasks.append(cq.get_cited_papers(paper_doi, citation_limit, from_dt, to_dt, fields_of_study))
-        for paper_doi in citing_paper_dois:
-            tasks.append(cq.get_citing_papers(paper_doi, citation_limit, from_dt, to_dt, fields_of_study))
+    # get paper filter results
+    exclusion_info = filter_papers(aligned_papers_dict, from_dt, to_dt, fields_of_study)
+    exc_dois = (exclusion_info['off_dt_range'] | exclusion_info['off_fields_of_study'] |
+                exclusion_info['below_min_citation'] | exclusion_info['off_author_scope'])
 
-        # run tasks
-        citation_json = []
-        if tasks:
-            logging.info(f"Running {len(tasks)} citation collection tasks concurrently...")
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logging.error(f"Citation collection task failed: {result}")
-                elif isinstance(result, list):
-                    citation_json.extend(result) # Add items from successful tasks
-                    logging.info("Main citation collection tasks finished.")
+    # Process into standard JSON format, separating included/excluded
+    inc_json, exc_json = [], []
+    # Use separate sets for deduplication within each list
+    inc_node_ids, exc_node_ids = set(), set()
+    inc_edge_tuples, exc_edge_tuples = set(), set()
+    
+    # Define paper properties to include (excluding 'authors')
+    paper_props = ['doi', 'title', 'abstract', 'year', 'publicationDate',
+                    'citationCount', 'referenceCount', 'influentialCitationCount', 'arxivId', 'arxivUrl',
+                    'isOpenAccess', 'openAccessPdf', 'version', 'paperId',
+                    'fieldsOfStudy'] # Add/remove as needed
+
+    for item in aligned_papers_dict:
+        paper_doi = item.get('doi') 
+        if paper_doi is None:
+            continue 
+
+        if paper_doi in exc_dois:
+            s2_paper_json = exc_json
+            processed_node_ids = exc_node_ids
+            processed_edge_tuples = exc_edge_tuples
         else:
-            logging.info("No main citation collection tasks to run.")
+            s2_paper_json = inc_json
+            processed_node_ids = inc_node_ids
+            processed_edge_tuples = inc_edge_tuples
 
-        # add item as json
-        self._add_items_json(citation_json, source='citation_search')
-        logging.info(f"After citation search: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+        # --- Process Paper Node ---
 
-        # update explored nodes
-        if len(ref_paper_dois) > 0:
-            self.explored_nodes['reference'].extend(ref_paper_dois)
-        if len(citing_paper_dois) is not None:
-            self.explored_nodes['citing'].extend(citing_paper_dois) 
+        paper_properties = {k: v for k, v in item.items() if k in paper_props and v is not None}
+        paper_node = {
+            "type": "node",
+            "id": paper_doi,
+            "labels": ["Paper"],
+            "properties": paper_properties # Use filtered properties
+            }
+        s2_paper_json.append(paper_node)
+        processed_node_ids.add(paper_doi)
 
+        # --- Process Authors ---
+        authors = item.get('authors', [])[:10]
+        for idx, author in enumerate(authors):
+            # process author node
+            author_id = author.get('authorId')
+            if author_id is not None:
+                if author_id not in processed_node_ids:
+                    author_props = {k: v for k, v in author.items() if k in ['authorId', 'name'] and v is not None}
+                    author_node = {
+                        "type": "node",
+                        "id": author_id,
+                        "labels": ["Author"],
+                        "properties": author_props}
+                    s2_paper_json.append(author_node)
+                    processed_node_ids.add(author_id)
+            
+                # process author -> WRITES -> paper
+                edge_tuple = (author_id, paper_doi, "WRITES")
+                if edge_tuple not in processed_edge_tuples:
+                    author_order = idx + 1
+                    author_paper_relationship = {
+                        "type": "relationship",
+                        "relationshipType": "WRITES",
+                        "startNodeId": author_id,
+                        "endNodeId": paper_doi,
+                        "properties": {'authorOrder': author_order}
+                        }
+                    s2_paper_json.append(author_paper_relationship)
+                    processed_edge_tuples.add(edge_tuple)
 
-    async def paper_recommendation(
-            self,
-            # for S2 recommendations
-            pos_paper_dois: Optional[List] = [],
-            neg_paper_dois: Optional[List] = [],
-            # search params
-            recommend_limit: Optional[int] = 100,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
+        # --- Process Journal ---
+        journal = item.get('journal', {})
+
+        paper_in_journal_props = {}
+        if isinstance(journal, dict):
+            journal_name = journal.get('name')  
+            paper_in_journal_props['volume'] = journal.get('volume')
+            paper_in_journal_props['pages'] = journal.get('pages')
+            # Filter None values from properties
+            paper_in_journal_props = {k:v for k,v in paper_in_journal_props.items() if v is not None}
+        else:
+            journal_name = None
+
+        if journal_name is not None:
+            journal_hash_id = generate_hash_key(journal_name)
+            if journal_hash_id not in processed_node_ids:
+                journal_props = {"journal_hash_id": journal_hash_id, "name": journal_name, "hash_method":"hashlib.sha256"}
+                journal_node = {
+                    "type": "node",
+                    "id": journal_hash_id,
+                    "labels": ["Journal"],
+                    "properties": journal_props}
+                s2_paper_json.append(journal_node)
+                processed_node_ids.add(journal_hash_id)
+            
+            # process paper -> PRINTS_ON -> journal
+            edge_tuple = (paper_doi, journal_hash_id, "PRINTS_ON")
+            if edge_tuple not in processed_edge_tuples:
+                if 'arxiv' not in journal_name.lower():  # exclude arxiv from journal
+                    paper_journal_relationship = {
+                        "type": "relationship",
+                        "relationshipType": "PRINTS_ON",
+                        "startNodeId": paper_doi,
+                        "endNodeId": journal_hash_id,
+                        "properties": paper_in_journal_props}
+                    s2_paper_json.append(paper_journal_relationship)
+                    processed_edge_tuples.add(edge_tuple)
+
+        # --- Process Venue ---
+        venue = item.get('publicationVenue', {})
+        venue_id = venue.get('id') if isinstance(venue, dict) else None
+        venue_name = venue.get('name', '') if isinstance(venue, dict) else ''
+        if venue_id is not None:
+            if venue_id not in processed_node_ids:
+                venue_props = {k: v for k, v in venue.items() if k in ['id', 'name', 'type', 'url'] and v is not None}
+                venue_node = {
+                    "type": "node",
+                    "id": venue_id,
+                    "labels": ["Venue"],
+                    "properties": venue_props
+                    }
+                s2_paper_json.append(venue_node)
+                processed_node_ids.add(venue_id)
+            
+            # process paper -> RELEASES_IN -> venue
+            edge_tuple = (paper_doi, venue_id, "RELEASES_IN")
+            if edge_tuple not in processed_edge_tuples:
+                if 'arxiv' not in venue_name.lower():  # exclude arxiv from venue
+                    paper_venue_relationship = {
+                        "type": "relationship",
+                        "relationshipType": "RELEASES_IN",
+                        "startNodeId": paper_doi,
+                        "endNodeId": venue_id,
+                        "properties": {}}
+                    s2_paper_json.append(paper_venue_relationship)
+                    processed_edge_tuples.add(edge_tuple)
+
+    processed_result = {'include': inc_json,
+                        'exclude': exc_json,
+                        'exclusion_info':exclusion_info}
+    return processed_result
+```
+
+在以上函数的基础上，编写process_citation_data函数，以处理s2的citation数据处理为满足neo4j的json格式，函数代码如下：
+
+```python
+def process_citation_data(
+        original_paper_doi: str,
+        s2_citations: List[Dict]|Dict,
+        citation_type: Literal['citingPaper','citedPaper'],
+        from_dt: Optional[str] = None,   # filter publish dt no earlier than
+        to_dt: Optional[str] = None,   # filter publish dt no late than
+        fields_of_study: Optional[List[str]] = None,  # list of field of study    
         ):
-        """paper recommendations based on posiive paper dois and negtive paper dois"""
-        if len(pos_paper_dois) > 0:
-            logging.info(f"Recommend papers based on {len(pos_paper_dois)} positive papers and {len(neg_paper_dois)} papers.")
-            rq = PaperRecommendation()
-            recommend_json = rq.get_recommend_papers(
-                pos_paper_dois,
-                neg_paper_dois,
-                recommend_limit, 
-                from_dt, 
-                to_dt, 
-                fields_of_study)
+    """standardize paper citation relationships to better suit neo4j format
+    Argss:
+        s2_citation_metadata ([List[Dict]|Dict]): citing or cited by metadata
+    Returns:
+        - the json has to be preprocessed to in format like:
+                        [{'type': 'node',
+                        'id': '2345003971',
+                        'labels': ['Author'],
+                        'properties': {'authorId': '2345003971', 'name': 'Mark Schone'}},
+                        {'type': 'relationship',
+                        'relationshipType': 'WRITES',
+                        'startNodeId': '2345003971',
+                        'endNodeId': '10.48550/arXiv.2502.07827',
+                        'properties': {'authorOrder': 1,
+                        'coauthors': [{'authorId': '2345003971', 'name': 'Mark Schone'},]}}]    
+    """
+    # for citations (citing or cited papers)
+    if isinstance(s2_citations, dict):
+        s2_citations = [s2_citations] 
 
-        # add item as json
-        self._add_items_json(recommend_json, source='paper_recommendation')
-        logging.info(f"After recommendation: Nodes: {len(self.nodes_json)}, Edges: {len(self.edges_json)}")
+    # Process into standard JSON format, separating included/excluded
+    inc_json, exc_json = [], []
+    # Use separate sets for deduplication within each list
+    inc_node_ids, exc_node_ids = set(), set()
+    inc_edge_tuples, exc_edge_tuples = set(), set()
 
-        # update explored nodes
-        if len(pos_paper_dois) > 0:
-            self.explored_nodes['recommendation'].append(([pos_paper_dois, neg_paper_dois]))
+    exclusion_info = {
+        'off_dt_range': set(),
+        'off_fields_of_study': set(),
+        'below_min_citation': set(),
+        'off_author_scope': set(),
+    }
 
+    for item in s2_citations:
+        # each item corresponindg to one paper
+        s2_papers = item.get(citation_type)  # get either citing or cited paper metadata
+        if isinstance(s2_papers, dict):
+            # process s2 papers
+            papers_processed = process_paper_data(s2_papers, from_dt, to_dt, fields_of_study)
+            
+            for item in papers_processed['include']:
+                if item['type'] == 'node' and item['id'] not in inc_node_ids:
+                    inc_json.append(item)
+                    inc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in inc_edge_tuples:
+                        inc_json.append(item)
+                        inc_edge_tuples.add(edge_tuple)
+            
+            for item in papers_processed['exclude']:
+                if item['type'] == 'node' and item['id'] not in exc_node_ids:
+                    exc_json.append(item)
+                    exc_node_ids.add(item['id'])
+                elif item['type'] == 'relationship':
+                    edge_tuple = (item['startNodeId'], item['endNodeId'], item['relationshipType'])
+                    if edge_tuple not in exc_edge_tuples:
+                        exc_json.append(item)
+                        exc_edge_tuples.add(edge_tuple)
 
-    async def consolidated_search(
-            self,
-            # for paper / author info
-            topics: Optional[List]=[],
-            paper_titles: Optional[List]=[],
-            paper_dois: Optional[List]=[],
-            author_ids: Optional[List]=[],
-            # for citation info
-            ref_paper_dois: Optional[List]=[],
-            citing_paper_dois: Optional[List]=[],
-            # for S2 recommendations
-            pos_paper_dois: Optional[List] = [],
-            neg_paper_dois: Optional[List] = [],
-            # search params
-            search_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100,
-            recommend_limit: Optional[int] = 100,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
-        ):
-        """consolidate paper search, author search, citation search and paper recommendations"""
-        tasks = []
-
-        if len(topics) > 0 or len(paper_titles) > 0 or len(paper_dois) > 0:
-            tasks.append(self.paper_search(
-                topics,
-                paper_titles,
-                paper_dois,
-                search_limit,
-                from_dt,
-                to_dt,
-                fields_of_study))
+        # get all paper dois in inc_json (supposed to have only one)
+        paper_dois = [x['id'] for x in inc_json if x['type'] == 'node' and x['label'] == ['Paper']]
         
-        if len(author_ids) > 0:
-            tasks.append(self.author_search(
-                author_ids,
-                from_dt,
-                to_dt,
-                fields_of_study))
-        
-        if len(ref_paper_dois) > 0 or len(citing_paper_dois) > 0:
-            tasks.append(self.citation_search(
-                ref_paper_dois,
-                citing_paper_dois,
-                citation_limit,
-                from_dt,
-                to_dt,
-                fields_of_study))
+        if len(paper_dois) > 0:
+            target_paper_doi = paper_dois[0]
+            if citation_type == 'citedPaper':  # source paper citing target papers
+                start_node_id = original_paper_doi
+                end_node_id = target_paper_doi
+            else:  # source paper cited by target papers
+                start_node_id = target_paper_doi
+                end_node_id = original_paper_doi 
 
-        if len(pos_paper_dois) > 0:
-            tasks.append(self.paper_recommendation(
-                pos_paper_dois,
-                neg_paper_dois,
-                recommend_limit,
-                from_dt,
-                to_dt,
-                fields_of_study))
-        
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # append paper -> CITES -> paper relationship
+            edge_tuple = (start_node_id, end_node_id, 'CITES')
+            if edge_tuple not in inc_edge_tuples:
+                properties = filter_and_reorder_dict(item, ['isInfluential', 'contexts', 'intents', 'contextsWithIntent'])
+                paper_cites_relationship = {
+                    "type": "relationship",
+                    "relationshipType": "CITES",
+                    "startNodeId": start_node_id,
+                    "endNodeId": end_node_id,
+                    "properties": properties}
+                inc_json.append(paper_cites_relationship)
+                inc_edge_tuples.add(edge_tuple)
+
+            exclusion_info['off_dt_range'].update(papers_processed['exclusion_info']['off_dt_range'])
+            exclusion_info['off_fields_of_study'].update(papers_processed['exclusion_info']['off_fields_of_study'])
+            exclusion_info['below_min_citation'].update(papers_processed['exclusion_info']['below_min_citation'])
+            exclusion_info['off_author_scope'].update(papers_processed['exclusion_info']['off_author_scope'])
+            
+    processed_result = {'include': inc_json,
+                      'exclude': exc_json,
+                      'exclusion_info':exclusion_info}
+
+    return processed_result
+```
+
+注意citation元数据分为cited paper和citing paper，其中可能嵌套paper元数据，因此在其中调用process_paper_data函数进一步处理。
+
+请检查process_citation_data函数，完成以下任务：
+1. 检查代码是否存在显著错误，如有，请逐个说明；
+2. 备注其它的可优化项。
+
