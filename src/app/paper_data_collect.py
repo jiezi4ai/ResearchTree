@@ -89,7 +89,6 @@ class PaperSearch:
         self.removed_nodes = []
         self.removed_edges = []
 
-
         # initiate instances
         self.pq = pq_instance if pq_instance else PaperQuery()
         self.tq = tq_instance if tq_instance else TopicQuery()
