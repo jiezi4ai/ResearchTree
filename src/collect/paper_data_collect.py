@@ -1,9 +1,13 @@
+
+
 import asyncio
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict, Optional, Union, Any, Set, Tuple
 
 from semanticscholar.Paper import Paper
 from semanticscholar.Author import Author
+from semanticscholar.Citation import Citation
 from semanticscholar.Reference import Reference
+from semanticscholar.PaginatedResults import PaginatedResults
 
 import sys
 import os
@@ -18,6 +22,9 @@ from collect.paper_data_process import (process_papers_data, process_authors_dat
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
+NODE_PAPER = "Paper"
+NODE_AUTHOR = "Author"
 
 class PaperSearch:
     """
@@ -239,7 +246,7 @@ class PaperSearch:
                     logging.error(f"topic_search: Task for topic '{current_topic}' failed: {result}", exc_info=False)
                     self.not_found_nodes['topic'].add(current_topic)
 
-                elif hasattr(result, '_items') and result._items:
+                elif isinstance(result, PaginatedResults) and hasattr(result, '_items') and result._items:
                     papers_list = result._items
                     # Add paper metadata to data pool (deduplicated)
                     papers_dict = [item.raw_data for item in papers_list if isinstance(item, Paper) and hasattr(item, 'raw_data')]
@@ -357,7 +364,7 @@ class PaperSearch:
             tasks.append(self.s2.get_paper_authors(paper_id=pid, limit=limit))
         
         # --- 3. Execute and collect ---
-        all_authors_metadata: List[Any] = []
+        authors_metadata: List[Any] = []
         if tasks:
             logging.info(f"paper_author_search: Running {len(tasks)} author search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -368,153 +375,163 @@ class PaperSearch:
                     logging.error(f"paper_author_search: Task for paper '{current_paper_id}' failed: {result}", exc_info=False)
                     self.not_found_nodes['paper_author'].add(current_paper_id)
                 
-                elif hasattr(result, '_items') and result._items: # Result is PaginatedResult
-                    all_authors_metadata.extend(result._items)
-                
+                elif isinstance(result, PaginatedResults) and hasattr(result, '_items') and result._items: # Result is PaginatedResult
+                    authors_metadata.extend(result._items)
                 elif isinstance(result, list): # Should ideally be PaginatedResult, but handle list just in case
-                     all_authors_metadata.extend(result)
+                    authors_metadata.extend(result)
+                
                 else:
                     logging.warning(f"paper_author_search: Task for paper '{current_paper_id}' returned no results or failed silently.")
                     self.not_found_nodes['paper_author'].add(current_paper_id) # Mark as not found
 
-
-        # --- 3. Collect results data ---
-        # Run all query tasks concurrently
-        if tasks:
-            logging.info(f"Running {len(tasks)} author search for given papers query tasks concurrently...")
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for idx, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logging.error(f"Related paper search task failed: {result}")
-                    self.not_found_nodes['paper_author'] = paper_ids[idx]
-                elif isinstance(result, list):
-                    authors_metadata.extend(result)
-                else:
-                    logging.warning(f"Task for paper '{paper_ids[idx]}' returned None.")
-                    self.not_found_nodes['paper_author'].add(paper_ids[idx])
-
-    # --- 4. Update global status ---
-    # update explored nodes
-    if len(paper_ids) > 0:
-        self.explored_nodes['paper_author'].update(paper_ids)
-    
-    # split authors and papers
-    if len(authors_metadata) > 0:
-        for author_item in authors_metadata:
-            if not isinstance(author_item, Author):
-                continue
-            # drop papers in author
-            author_dict = {
-                k: v for k, v in author_item.raw_data.items()
-                if k not in ['papers'] and v is not None
-            }
-            self.data_pool['author'].append(author_dict)
+        # --- 4. Update global status ---
+        self.explored_nodes['paper_author'].update(ids_to_search)
+        
+        # split authors and papers
+        if authors_metadata > 0:
+            authors_dict = [author_item.raw_data for author_item in result if isinstance(author_item, Author) and hasattr(author_item, 'raw_data')]
+            self.data_pool['author'].add(authors_dict)
 
 
     async def reference_search(
             self,
-            ref_paper_ids: List[str],
+            paper_ids: List[str],
             citation_limit: Optional[int] = 100,
         ):
-        """citation search for reference information"""
-        # --- 1. Process paper ids to avoid duplicated search ---
-        ref_paper_ids = [x for x in ref_paper_ids if x not in self.explored_nodes['reference']]
+        """
+        Fetches papers referenced *by* the given paper_ids.
+        Adds raw paper metadata for the *referenced* papers to the pool (deduplicated).
+        Adds citation relationship data to self.data_pool['reference'].
+        """
+        citation_limit = citation_limit if citation_limit is not None else self.citation_limit
+        # --- 1. Filter ---
+        ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['reference']]
+        if not ids_to_search:
+            logging.info("reference_search: No new paper IDs to search for references.")
+            return
+
+        logging.info(f"reference_search: Fetching references for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
 
         # --- 2. Conduct search via Semantic Scholar ---
-        if len(ref_paper_ids) > 0:
-            tasks = []
-            logging.info(f"Preparing reference for {len(ref_paper_ids)} papers ...")
-            for pid in ref_paper_ids:
-                # return a list of references
-                tasks.append(self.s2.get_paper_references(paper_id=pid, limit=citation_limit))
+        tasks = []
+        for pid in ids_to_search:
+            # return a list of references
+            tasks.append(self.s2.get_paper_references(paper_id=pid, limit=citation_limit))
                 
-            # --- 3. Collect results data ---
-            # Run all query tasks concurrently
-            if tasks:
-                logging.info(f"Running {len(tasks)} reference search tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['reference'] = ref_paper_ids[idx]
-                    elif isinstance(result, list) and len(result) > 0:
-                        for ref_item in result:
-                            if not isinstance(ref_item, Reference):
-                                continue
-                            # get paper
-                            paper = ref_item.citedPaper
-                            if isinstance(paper, Paper):
-                                self.data_pool['paper'].append(paper.raw_data)
-                                # drop papers in reference
-                                ref_dict = {
-                                    k: v for k, v in ref_item.raw_data.items()
-                                    if k not in ['citedPaper'] and v is not None
-                                }
-                                ref_dict['source_id'] = ref_paper_ids[idx]
-                                ref_dict['target_id'] = paper.paperId 
-                                ref_dict['citation_type'] = 'CITES'
-                                self.data_pool['reference'].append(ref_dict)
-                    else:
-                        logging.warning(f"Task for paper '{ref_paper_ids[idx]}' returned None.")
-                        self.not_found_nodes['reference'].add(ref_paper_ids[idx])
+        # --- 3. Execute and collect ---
+        papers_added_count = 0
+        rels_added_count = 0
+        if tasks:
+            logging.info(f"reference_search: Running {len(tasks)} reference search tasks concurrently...")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for idx, result in enumerate(results):
+                source_paper_id = ids_to_search[idx] # The paper whose references we are fetching
+                if isinstance(result, Exception):
+                    logging.error(f"reference_search: Task for paper '{source_paper_id}' failed: {result}", exc_info=False)
+                    self.not_found_nodes['reference'] = source_paper_id
+
+                elif isinstance(result, PaginatedResults) and result._items:
+                    papers_to_add = []
+                    for ref_item in result._item:
+                        if not isinstance(ref_item, Reference) or not hasattr(ref_item, 'raw_data'): continue
+
+                        # get paper
+                        ref_paper = ref_item.citedPaper # The paper being referenced
+                        if isinstance(ref_paper, Paper) and hasattr(ref_paper, 'raw_data') and ref_paper.paperId:
+                            self.data_pool['paper'].append(ref_paper.raw_data)
+
+                            # Create citation relationship data
+                            ref_dict = {
+                                k: v for k, v in ref_item.raw_data.items()
+                                if k not in ['citedPaper', 'citingPaper'] and v is not None
+                            }
+                            ref_dict['source_id'] = source_paper_id
+                            ref_dict['target_id'] = ref_paper.paperId
+                            self.data_pool['reference'].append(ref_dict)
+                            rels_added_count += 1
+                        else:
+                            logging.debug(f"reference_search: Skipping reference from {source_paper_id} - missing valid citedPaper object: {ref_item.raw_data.get('citedPaper')}")
+
+                else:
+                    logging.warning(f"reference_search: Task for paper '{source_paper_id}' returned no results or failed silently.")
+                    self.not_found_nodes['reference'].add(source_paper_id)
+
+            logging.info(f"reference_search: Added {papers_added_count} new unique referenced papers and {rels_added_count} reference relationships.")
 
         # --- 4. Update global status ---
-        # update explored nodes
-        if len(ref_paper_ids) > 0:
-            self.explored_nodes['reference'].update(ref_paper_ids)
+        self.explored_nodes['reference'].update(ids_to_search)
 
 
     async def citing_search(
             self,
-            cit_paper_ids: Optional[List]=[],
+            paper_ids: Optional[List]=[],
             citation_limit: Optional[int] = 100,
         ):
-        """citation search for reference information"""
-        # --- 1. Process paper ids to avoid duplicated search ---
-        cit_paper_ids = [x for x in cit_paper_ids if x not in self.explored_nodes['citing']]
+        """
+        Fetches papers that cite the given paper_ids.
+        Adds raw paper metadata for the *citing* papers to the pool (deduplicated).
+        Adds citation relationship data to self.data_pool['citing'].
+        """
+        citation_limit = citation_limit if citation_limit is not None else self.citation_limit
+        # --- 1. Filter ---
+        ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['citing']]
+        if not ids_to_search:
+            logging.info("citing_search: No new paper IDs to search for citations.")
+            return
 
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(cit_paper_ids) > 0:
-            tasks = []
-            logging.info(f"Preparing citing for {len(cit_paper_ids)} papers ...")
-            for pid in cit_paper_ids:
-                # return a list of references
-                tasks.append(self.s2.get_paper_citations(paper_id=pid, limit=citation_limit))
+        logging.info(f"citing_search: Fetching citations for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
+
+        # --- 2. Create tasks ---
+        tasks = []
+        logging.info(f"Preparing citing for {len(ids_to_search)} papers ...")
+        for pid in ids_to_search:
+            # return a list of references
+            tasks.append(self.s2.get_paper_citations(paper_id=pid, limit=citation_limit))
                 
-            # --- 3. Collect results data ---
-            # Run all query tasks concurrently
-            if tasks:
-                logging.info(f"Running {len(tasks)} citing search tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['citing'] = cit_paper_ids[idx]
-                    elif isinstance(result, list):
-                        for cit_item in result:
-                            if not isinstance(cit_item, Reference):
-                                continue
-                            # get paper
-                            paper = cit_item.citedPaper
-                            if isinstance(paper, Paper):
-                                self.data_pool['paper'].append(paper.raw_data)
+        # --- 3. Execute and collect ---
+        papers_added_count = 0
+        rels_added_count = 0
+        # Run all query tasks concurrently
+        if tasks:
+            logging.info(f"citing_search: Running {len(tasks)} citation search tasks concurrently...")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for idx, result in enumerate(results):
+                target_paper_id = ids_to_search[idx] # The paper being cited
+                if isinstance(result, Exception):
+                    logging.error(f"citing_search: Task for paper '{target_paper_id}' failed: {result}", exc_info=False)
+                    self.not_found_nodes['citing'].add(target_paper_id)
+
+                elif isinstance(result, PaginatedResults) and result._items:
+                    for cit_item in result._item:
+                        if not isinstance(cit_item, Citation) or not hasattr(cit_item, 'raw_data'): continue
+
+                        # Get the citing paper
+                        citing_paper = cit_item.citingPaper
+                        if isinstance(citing_paper, Paper) and hasattr(citing_paper, 'raw_data') and citing_paper.paperId:
+                            self.data_pool['paper'].append(citing_paper.raw_data)
+                        
                             # drop papers in citing
                             cit_dict = {
                                 k: v for k, v in cit_item.raw_data.items()
-                                if k not in ['citingPaper'] and v is not None
+                                if k not in ['citedPaper', 'citingPaper'] and v is not None
                             }
-                            cit_dict['source_id'] = paper.paperId 
-                            cit_dict['target_id'] = cit_paper_ids[idx]
-                            cit_dict['citation_type'] = 'CITES'
-                            self.data_pool['citing'].append((cit_paper_ids[idx], 'citingPaper', cit_dict))
-                    else:
-                        logging.warning(f"Task for paper '{cit_paper_ids[idx]}' returned None.")
-                        self.not_found_nodes['citing'].add(cit_paper_ids[idx])
+                            cit_dict['source_id'] = citing_paper.paperId 
+                            cit_dict['target_id'] = target_paper_id
+                            self.data_pool['citing'].append(cit_dict)
+                        else:
+                            logging.debug(f"citing_search: Skipping citation for {target_paper_id} - missing valid citingPaper object: {cit_item.raw_data.get('citingPaper')}")
+                            
+                else:
+                    logging.warning(f"citing_search: Task for paper '{target_paper_id}' returned no results or failed silently.")
+                    self.not_found_nodes['citing'].add(target_paper_id)
+
+            logging.info(f"citing_search: Added {papers_added_count} new unique citing papers and {rels_added_count} citation relationships.")
 
         # --- 4. Update global status ---
         # update explored nodes
-        if len(cit_paper_ids) > 0:
-            self.explored_nodes['citing'].update(cit_paper_ids)
+        self.explored_nodes['citing'].update(ids_to_search)
 
 
     async def paper_recommendation(
@@ -523,22 +540,35 @@ class PaperSearch:
             neg_paper_ids: Optional[List] = [],
             recommend_limit: Optional[int] = 100,
         ):
-        """paper recommendations based on posiive paper ids and negtive paper ids"""
-        # --- 1. Get recommend papers from Semantic Scholar ---
-        if len(pos_paper_ids) > 0:
-            logging.info(f"Recommend papers based on {len(pos_paper_ids)} positive papers and {len(neg_paper_ids)} papers.")
-            papers_metadata = await self.s2.get_recommended_papers_from_lists(
-                positive_paper_ids=pos_paper_ids,
-                negative_paper_ids=neg_paper_ids,
-                limit=recommend_limit)
+        """
+        Fetches paper recommendations based on positive and negative paper IDs.
+        Adds recommended raw paper metadata to the pool (deduplicated).
+        """
+        neg_paper_ids = neg_paper_ids or []
+        recommend_limit = recommend_limit if recommend_limit is not None else self.recommend_limit
+        # Create a unique, hashable key for explored check
+        recommendation_key = (tuple(sorted(pos_paper_ids)), tuple(sorted(neg_paper_ids)))
+
+        # --- 1. Filter ---
+        if not pos_paper_ids:
+            logging.error("paper_recommendation: No positive paper IDs provided.")
+            return
+
+        logging.info(f"paper_recommendation: Fetching {recommend_limit} recommendations based on {len(pos_paper_ids)} positive and {len(neg_paper_ids)} negative papers.")
+        
+        # --- 2. Get recommend papers ---
+        # search returns a list of papers
+        papers_metadata = await self.s2.get_recommended_papers_from_lists(
+            positive_paper_ids=pos_paper_ids,
+            negative_paper_ids=neg_paper_ids,
+            limit=recommend_limit)
 
         # --- 3. Update global status ---
         # update explored nodes
-        if len(pos_paper_ids) > 0:
-            self.explored_nodes['recommendation'].add((tuple(sorted(pos_paper_ids)), tuple(sorted(neg_paper_ids))))
+        self.explored_nodes['recommendation'].add(recommendation_key)
 
         # add paper metadata to data pool
-        if len(papers_metadata) > 0:
+        if papers_metadata:
             papers_dict = [item.raw_data for item in papers_metadata if isinstance(item, Paper)]
             self.data_pool['paper'].extend(papers_dict)
 
@@ -549,117 +579,191 @@ class PaperSearch:
     async def consolidated_search(
             self,
             # for paper / author info
-            topics: Optional[List]=[],
-            paper_titles: Optional[List]=[],
-            paper_ids: Optional[List]=[],
-            author_ids: Optional[List]=[],
-            # for citation info
-            ref_paper_ids: Optional[List]=[],
-            citing_paper_ids: Optional[List]=[],
-            # for S2 recommendations
-            pos_paper_ids: Optional[List] = [],
-            neg_paper_ids: Optional[List] = [],
+            topics: Optional[List] = None,
+            paper_titles: Optional[List] = None,
+            paper_ids: Optional[List] = None,
+            author_ids: Optional[List] = None,
+            author_paper_ids: Optional[List[str]] = None, # Paper IDs to fetch authors for
+            # for citation info, be very careful to use s2 paper ids
+            ref_paper_ids: Optional[List] = None,
+            citing_paper_ids: Optional[List] = None,
+            # for S2 recommendations, be very careful to use s2 paper ids
+            pos_paper_ids: Optional[List] = None,
+            neg_paper_ids: Optional[List] = None,
             # search params
-            search_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100,
-            recommend_limit: Optional[int] = 100,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
+            author_limit: Optional[int] = None, # Limit for fetch_authors_for_papers
+            search_limit: Optional[int] = None,
+            citation_limit: Optional[int] = None,
+            recommend_limit: Optional[int] = None,
+            from_dt: Optional[str] = None,
+            to_dt: Optional[str] = None,
             fields_of_study: Optional[List] = None
         ):
-        """consolidate paper search, author search, citation search and paper recommendations"""
-        tasks = []       
+        """
+        Consolidates various search types into a single asynchronous execution.
+        """
+        tasks = []
+        logging.info("consolidated_search: Starting...")
 
-        if len(paper_titles) > 0 or len(paper_ids) > 0:
+        # --- Paper Info ---
+        if paper_titles or paper_ids:
             tasks.append(self.paper_search(paper_titles, paper_ids))
-        
-        if len(author_ids) > 0:
-            tasks.append(self.authors_search(author_ids))
-        
-        if len(ref_paper_ids) > 0:
-            tasks.append(self.reference_search(ref_paper_ids, citation_limit))
+        if topics:
+            tasks.append(self.topic_search(topics, search_limit, from_dt, to_dt, fields_of_study))  
 
-        if len(citing_paper_ids) > 0:
+        # --- Author Info ---
+        if author_ids:
+            tasks.append(self.authors_search(author_ids))
+        if author_paper_ids:
+            tasks.append(self.paper_author_search(author_paper_ids, author_limit))
+
+        # --- Citation Info ---
+        if ref_paper_ids:
+            tasks.append(self.reference_search(ref_paper_ids, citation_limit))
+        if citing_paper_ids:
             tasks.append(self.citing_search(citing_paper_ids, citation_limit))
 
+        # --- Recommendations ---
         if len(pos_paper_ids) > 0:
             tasks.append(self.paper_recommendation(pos_paper_ids, neg_paper_ids, recommend_limit))
 
-        if len(topics) > 0:
-            tasks.append(self.topic_search(topics, search_limit, from_dt, to_dt, fields_of_study))  
-
+        # --- Execute All ---
         if tasks:
+            logging.info(f"consolidated_search: Running {len(tasks)} sub-tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            if len(results) > 0:
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        # help track error information
-                        logging.error(f"A sub-task in consolidated_search failed: {result}", exc_info=True)
+            logging.info("consolidated_search: Sub-tasks finished.")
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # Identify the failed task (requires more complex tracking or assumptions)
+                    logging.error(f"consolidated_search: A sub-task failed: {result}", exc_info=True) # Log traceback
+        else:
+            logging.warning("consolidated_search: No search criteria provided.")
+
+        logging.info("consolidated_search: Finished.")
 
 
     ############################################################################
     # paper search results post processing
     ############################################################################
-    async def supplement_abstract(
-            self, 
-            paper_ids:Union[List[str], str]):
-        """search from Semantic Scholar for paper abstract information"""
-        if isinstance(paper_ids, str):
-            paper_ids = [paper_ids]
-
-        if len(paper_ids) > 0:
-            logging.info(f"Fetching {len(paper_ids)} papers for abstracts ...")
-            papers_abstract_info = await self.s2.get_papers(paper_ids=paper_ids, fields=['paperId', 'abstract'])
-            papers_abstract_ref = {item['paperId']:item['abstract'] for item in papers_abstract_info}
-            return papers_abstract_ref
-        else:
+    async def supplement_abstract(self, paper_ids:Union[List[str], str]) -> Dict[str, Optional[str]]:
+        """
+        Fetches abstracts for given paper IDs from Semantic Scholar.
+        Returns a dictionary mapping paperId to abstract.
+        paper_ids: already filter out any IDs with abstracts
+        """
+        if not paper_ids:
             return {}
 
-    async def post_process(
-            self,
-            if_supplement_abstract: Optional[bool] = True,  # whether add abstract information
-            ):
-        """post process collected paper metadata"""
+        logging.info(f"supplement_abstract: Fetching abstracts for {len(paper_ids)} papers...")
+        papers_abstract_info: List[Paper] = []
+        papers_abstract_info = await self.s2.get_papers(paper_ids=paper_ids, fields=['paperId', 'abstract'])
+
+        papers_abstract_ref: Dict[str, Optional[str]] = {pid: None for pid in paper_ids} # Initialize
+        if papers_abstract_info:
+            for item in papers_abstract_info:
+                 if isinstance(item, Paper) and item.paperId in papers_abstract_ref:
+                     papers_abstract_ref[item.paperId] = item.abstract # Will be None if S2 doesn't have it
+
+        found_count = sum(1 for v in papers_abstract_ref.values() if v is not None)
+        logging.info(f"supplement_abstract: Found abstracts for {found_count}/{len(paper_ids)} papers.")
+        return papers_abstract_ref
+
+
+    async def post_process(self, if_supplement_abstract: Optional[bool] = True):
+        """
+        Processes the raw data collected in self.data_pool using s2_data_process functions.
+        Populates self.nodes_json and self.edges_json with Neo4j-compatible dictionaries.
+        Handles deduplication across different data types processed.
+        Optionally supplements missing abstracts.
+        """
+        logging.info("post_process: Starting data processing...")
         nodes_edges_json = []
 
-        if len(self.data_pool['paper']) > 0:
-            papers_json = process_papers_data(self.data_pool['paper'])
+        # Initialize sets here to pass across processing functions
+        _node_ids: Set[str] = set()
+        _edge_tuples: Set[Tuple[str, str, str]] = set()
+
+        # --- 1. Process Papers ---
+        if self.data_pool['paper']:
+            logging.info(f"Processing {len(self.data_pool['paper'])} raw paper entries...")
+            papers_json = process_papers_data(
+                self.data_pool['paper'],
+                existing_nodes=_node_ids,
+                existing_edges=_edge_tuples)
+            logging.info(f"Generated {len(papers_json)} nodes/edges from papers.")
 
             # supplement abstract for papers
             if if_supplement_abstract:
                 null_abstract_ids = []
-                for item in papers_json:
-                    if (item.get('type') == 'node' and item.get('label') == ['Paper'] 
+                paper_nodes_indices = {} # Store index to update later
+                for idx, item in enumerate(papers_json):
+                    if (item.get('type') == 'node' and NODE_PAPER in item.get('label') 
                         and item.get('properties', {}).get('abstract') is None):
+                        paper_id = item['id']
                         null_abstract_ids.append(item['id'])
+                        paper_nodes_indices[paper_id] = idx
 
-                papers_abstract_ref = await self.supplement_abstract(null_abstract_ids)
-                for item in papers_json:
-                    if item.get('type') == 'node' and item.get('label') == ['Paper']:
-                        pid = item['id']
-                        abstract = papers_abstract_ref.get(pid)
-                        if abstract is not None:
-                            item['properties']['abstract'] = abstract
+                if null_abstract_ids:
+                    logging.info(f"Found {len(null_abstract_ids)} paper nodes missing abstracts. Attempting to supplement...")
+                    papers_abstract_ref = await self.supplement_abstract(null_abstract_ids)
+                    update_count = 0
+                    for pid, abstract in papers_abstract_ref.items():
+                        if abstract is not None and pid in paper_nodes_indices:
+                            node_index = paper_nodes_indices[pid]
+                            # Ensure the item is still a node and has properties
+                            if papers_json[node_index].get('type') == 'node' and 'properties' in papers_json[node_index]:
+                                papers_json[node_index]['properties']['abstract'] = abstract
+                                update_count += 1
+                            else:
+                                logging.warning(f"post_process: Could not update abstract for paper {pid} at index {node_index} - item structure changed unexpectedly.")
+                    logging.info(f"Successfully supplemented abstracts for {update_count} papers.")
             
             nodes_edges_json.extend(papers_json)
+            logging.info(f"Total items after paper processing: {len(nodes_edges_json)}")
+        else:
+            logging.info("No paper data in pool to process.")
 
+        # --- 2. Process Authors ---
         if len(self.data_pool['author']) > 0:
-            authors_json = process_authors_data(self.data_pool['author'])
+            logging.info(f"Processing {len(self.data_pool['author'])} raw author entries...")
+            authors_json = process_authors_data(
+                self.data_pool['author'],
+                existing_nodes=_node_ids,
+                existing_edges=_edge_tuples)
             nodes_edges_json.extend(authors_json)
-
+            logging.info(f"Generated {len(authors_json)} nodes/edges from authors. Total items: {len(nodes_edges_json)}")
+        else:
+            logging.info("No author data in pool to process.")
+        
+        # --- 3. Process Topics ---
         if len(self.data_pool['topic']) > 0:
-            topics_json = process_topics_data(self.data_pool['topic'])
+            logging.info(f"Processing {len(self.data_pool['topic'])} raw topic link entries...")
+            topics_json = process_topics_data(
+                self.data_pool['topic'],
+                existing_nodes=_node_ids,
+                existing_edges=_edge_tuples)
             nodes_edges_json.extend(topics_json)
+            logging.info(f"Generated {len(topics_json)} nodes/edges from topics. Total items: {len(nodes_edges_json)}")
+        else:
+            logging.info("No topic data in pool to process.")
 
-        if len(self.data_pool['reference']) > 0:
-            references_json = process_citations_data(self.data_pool['reference'])
-            nodes_edges_json.extend(references_json)
+        # --- 4. Process Citations (References & Citings combined) ---
+        # Combine both reference and citing data as they produce the same CITES relationship type
+        all_citations_data = self.data_pool['reference'] + self.data_pool['citing']
+        if all_citations_data:
+            logging.info(f"Processing {len(all_citations_data)} raw citation entries ({len(self.data_pool['reference'])} refs, {len(self.data_pool['citing'])} citings)...")
+            # Pass the *updated* edge set (node set less relevant here)
+            citations_json = process_citations_data(
+                all_citations_data,
+                existing_edges=_edge_tuples
+            )
+            nodes_edges_json.extend(citations_json)
+            logging.info(f"Generated {len(citations_json)} citation relationships. Total items: {len(nodes_edges_json)}")
+        else:
+            logging.info("No citation data (references or citings) in pool to process.")
 
-        if len(self.data_pool['citing']) > 0:
-            citings_json = process_citations_data(self.data_pool['citing'])
-            nodes_edges_json.extend(citings_json)
-
-        # allow duplication in nodes and edges, would dedup in later stage
+        # --- 5. Finalize Output ---
+        # Separate nodes and edges into final lists
         for item_json in nodes_edges_json:
             if item_json.get('type') == 'node':
                 self.nodes_json.append(item_json)
