@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 NODE_PAPER = "Paper"
 NODE_AUTHOR = "Author"
 
-class PaperSearch:
+class PaperCollector:
     """
     A class for exploring academic papers, optimized for asynchronous operations.
     """
@@ -146,7 +146,7 @@ class PaperSearch:
         if titles_to_search:
             logging.info(f"paper_search: Creating {len(titles_to_search)} tasks for titles...")
             for title in titles_to_search:
-                coro = self.s2.search_paper(query=title, limit=5, fields=['paperId', 'title']) # Limit results for title match
+                coro = self.s2.search_paper(query=title, limit=5, match_title=True) # Limit results for title match
                 tasks_with_source.append({'source': 'title', 'values': [title], 'result': coro})
                 task_coroutines.append(coro)
 
@@ -170,7 +170,7 @@ class PaperSearch:
                             papers_dict = [item.raw_data for item in result if isinstance(item, Paper)]
                             self.data_pool['paper'].extend(papers_dict)
                         elif isinstance(result, Paper): 
-                            self.data_pool['paper'].add(result.raw_data)
+                            self.data_pool['paper'].append(result.raw_data)
                         
                     else:
                         # Handle cases where the API might return None without an exception
@@ -388,9 +388,10 @@ class PaperSearch:
         self.explored_nodes['paper_author'].update(ids_to_search)
         
         # split authors and papers
-        if authors_metadata > 0:
-            authors_dict = [author_item.raw_data for author_item in result if isinstance(author_item, Author) and hasattr(author_item, 'raw_data')]
-            self.data_pool['author'].add(authors_dict)
+        if authors_metadata:
+            authors_dict = [author_item.raw_data for author_item in authors_metadata 
+                            if isinstance(author_item, Author) and hasattr(author_item, 'raw_data')]
+            self.data_pool['author'].extend(authors_dict)
 
 
     async def reference_search(
@@ -432,14 +433,15 @@ class PaperSearch:
                     self.not_found_nodes['reference'] = source_paper_id
 
                 elif isinstance(result, PaginatedResults) and result._items:
-                    papers_to_add = []
-                    for ref_item in result._item:
+                    logging.info(f"reference_search: Retrieving reference for paper '{source_paper_id}'")
+                    for ref_item in result._items:
                         if not isinstance(ref_item, Reference) or not hasattr(ref_item, 'raw_data'): continue
 
                         # get paper
-                        ref_paper = ref_item.citedPaper # The paper being referenced
-                        if isinstance(ref_paper, Paper) and hasattr(ref_paper, 'raw_data') and ref_paper.paperId:
+                        ref_paper = ref_item.paper if hasattr(ref_item, 'paper') else None # The paper being referenced
+                        if (isinstance(ref_paper, Paper) and hasattr(ref_paper, 'raw_data') and ref_paper.paperId):
                             self.data_pool['paper'].append(ref_paper.raw_data)
+                            papers_added_count += 1
 
                             # Create citation relationship data
                             ref_dict = {
@@ -504,13 +506,14 @@ class PaperSearch:
                     self.not_found_nodes['citing'].add(target_paper_id)
 
                 elif isinstance(result, PaginatedResults) and result._items:
-                    for cit_item in result._item:
+                    for cit_item in result._items:
                         if not isinstance(cit_item, Citation) or not hasattr(cit_item, 'raw_data'): continue
-
+                        
                         # Get the citing paper
-                        citing_paper = cit_item.citingPaper
+                        citing_paper = cit_item.paper if hasattr(cit_item, 'paper') else None
                         if isinstance(citing_paper, Paper) and hasattr(citing_paper, 'raw_data') and citing_paper.paperId:
                             self.data_pool['paper'].append(citing_paper.raw_data)
+                            papers_added_count += 1
                         
                             # drop papers in citing
                             cit_dict = {
@@ -520,6 +523,7 @@ class PaperSearch:
                             cit_dict['source_id'] = citing_paper.paperId 
                             cit_dict['target_id'] = target_paper_id
                             self.data_pool['citing'].append(cit_dict)
+                            rels_added_count += 1
                         else:
                             logging.debug(f"citing_search: Skipping citation for {target_paper_id} - missing valid citingPaper object: {cit_item.raw_data.get('citingPaper')}")
                             

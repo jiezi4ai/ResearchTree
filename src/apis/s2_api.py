@@ -1,7 +1,12 @@
+# Potential update
+# disable internal retry
+# shorten time out
+
 import asyncio
 import logging
 import time
-import re # Keep re for original AsyncSemanticScholar usage if needed elsewhere
+import re 
+from tenacity import RetryError
 from typing import List, Tuple, Union, Optional, Set, Any, Literal
 
 # Import semantic scholar
@@ -25,9 +30,11 @@ except ImportError:
     print("Warning: aiohttp not found. Status code 429 check might be inaccurate.")
 
 
+DEFAULT_TIME_OUT = 30
 DEFAULT_MAX_CONCURRENCY = 20  # Default concurrency limit
 DEFAULT_SLEEP_INTERVAL = 3.0  # Default sleep interval in seconds
-DEFAULT_MAX_RETRIES = 5  # Default max retries if failed
+DEFAULT_MAX_RETRIES = 20  # Default max retries if failed
+ENABLE_INTERNAL_RETRIES = False  # Disable internal retries
 
 
 # Configure logging
@@ -62,7 +69,7 @@ class SemanticScholarKit:
         sleep_interval: float = DEFAULT_SLEEP_INTERVAL, 
         log_level: int = logging.INFO,
         # Pass underlying retry setting to AsyncSemanticScholar's requester
-        internal_requester_retry: bool = True 
+        internal_requester_retry: bool = ENABLE_INTERNAL_RETRIES 
     ) -> None:
         """
         Initializes the SemanticScholarKit.
@@ -125,39 +132,72 @@ class SemanticScholarKit:
                     result = await coro_func(*args, **kwargs)
                     return result
                 
-                except HttpClientError as e:
-                    if hasattr(e, 'status') and e.status == 429:
+                except RetryError as e: # Catch tenacity error first
+                    # Check if the root cause is the 429 ConnectionRefusedError
+                    is_429 = False
+                    if isinstance(e.__cause__, ConnectionRefusedError):
+                        cause_str = str(e.__cause__).lower()
+                        if "429" in cause_str or "too many requests" in cause_str:
+                            is_429 = True
+
+                    if is_429:
                         if attempt < self.max_retry:
                             logger.warning(
-                                f"Rate limit (429) hit for {func_name} "
+                                f"Rate limit (429) hit (via RetryError) for {func_name} "
+                                f"(ID/Query/URL: {identifier}). Underlying tenacity retries failed. "
+                                f"Attempting outer retry {attempt + 1}/{self.max_retry + 1}. "
+                                f"Retrying after {self.sleep_interval} seconds..."
+                            )
+                            await asyncio.sleep(self.sleep_interval)
+                            continue
+                        else:
+                            logger.error(
+                                f"Rate limit (429) hit (via RetryError) for {func_name} "
+                                f"(ID/Query/URL: {identifier}). Max outer retries ({self.max_retry}) exceeded after underlying tenacity retries failed."
+                            )
+                            raise e # Re-raise RetryError
+                    else:
+                        # If RetryError was caused by something else, treat as unexpected
+                        logger.exception(f"A tenacity RetryError occurred for {func_name} "
+                                        f"(ID/Query/URL: {identifier}). Cause: {e.__cause__}. "
+                                        f"Attempt {attempt + 1}/{self.max_retry + 1}.")
+                        raise e # Re-raise RetryError
+
+                except ConnectionRefusedError as e: # Keep this for cases tenacity might not catch (unlikely for 429 with this library)
+                    is_429 = False
+                    if hasattr(e, 'status') and e.status == 429:
+                        is_429 = True
+                    else:
+                        e_str = str(e).lower()
+                        if "429" in e_str or "too many requests" in e_str:
+                            is_429 = True
+
+                    if is_429:
+                        if attempt < self.max_retry:
+                            logger.warning(
+                                f"Rate limit (429) hit directly for {func_name} "
                                 f"(ID/Query/URL: {identifier}). Attempt {attempt + 1}/{self.max_retry + 1}. "
                                 f"Retrying after {self.sleep_interval} seconds..."
                             )
                             await asyncio.sleep(self.sleep_interval)
-                            continue 
+                            continue
                         else:
                             logger.error(
-                                f"Rate limit (429) hit for {func_name} "
+                                f"Rate limit (429) hit directly for {func_name} "
                                 f"(ID/Query/URL: {identifier}). Max retries ({self.max_retry}) exceeded."
                             )
-                            raise e 
+                            raise e
                     else:
-                        logger.error(f"HTTP error {getattr(e, 'status', 'N/A')} calling {func_name} "
-                                     f"(ID/Query/URL: {identifier}): {e}")
-                        raise e 
+                        # Other ConnectionRefusedError
+                        logger.error(f"ConnectionRefusedError (not 429) calling {func_name} "
+                                    f"(ID/Query/URL: {identifier}): {e}")
+                        raise e
 
                 except ObjectNotFoundException as e:
-                    failed_id = identifier if identifier and not identifier.startswith(("batch:", "query:", "url:")) else "unknown"
-                    if failed_id != "unknown":
-                         self.not_found_ids.add(failed_id)
-                         logger.warning(f"ObjectNotFoundException for {func_name}: ID '{failed_id}' not found. Stored.")
-                    else:
-                         logger.warning(f"ObjectNotFoundException for {func_name} (ID could not be determined from args/kwargs). {e}")
-                    
-                    # Return None for single lookups, re-raise otherwise
+                    # ... (your existing logic) ...
                     if func_name in ['get_paper', 'get_author']:
-                        return None 
-                    raise e 
+                        return None
+                    raise e
 
                 except BadQueryParametersException as e:
                      logger.error(f"BadQueryParametersException for {func_name} "
