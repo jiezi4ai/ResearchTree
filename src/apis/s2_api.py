@@ -2,10 +2,9 @@
 # disable internal retry
 # shorten time out
 
+import math
 import asyncio
 import logging
-import time
-import re 
 from tenacity import RetryError
 from typing import List, Tuple, Union, Optional, Set, Any, Literal
 
@@ -31,10 +30,12 @@ except ImportError:
 
 
 DEFAULT_TIME_OUT = 30
+DEFAULT_BTCH_SIZE = 100
 DEFAULT_MAX_CONCURRENCY = 20  # Default concurrency limit
 DEFAULT_SLEEP_INTERVAL = 3.0  # Default sleep interval in seconds
 DEFAULT_MAX_RETRIES = 20  # Default max retries if failed
 ENABLE_INTERNAL_RETRIES = False  # Disable internal retries
+
 
 
 # Configure logging
@@ -64,6 +65,7 @@ class SemanticScholarKit:
         api_key: str = None,
         api_url: str = None,
         # Kit parameters
+        batch_size: int = DEFAULT_BTCH_SIZE,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         max_retry: int = DEFAULT_MAX_RETRIES,
         sleep_interval: float = DEFAULT_SLEEP_INTERVAL, 
@@ -100,6 +102,7 @@ class SemanticScholarKit:
         if sleep_interval <= 0:
             raise ValueError("sleep_interval must be positive")
             
+        self.batch_size = batch_size
         self.max_concurrency = max_concurrency
         self.max_retry = max_retry
         self.sleep_interval = sleep_interval
@@ -334,29 +337,69 @@ class SemanticScholarKit:
             fields=fields
         )
 
-    async def get_papers(
+    async def get_papers( 
         self,
         paper_ids: List[str],
         fields: list = None,
         return_not_found: bool = False
     ) -> Union[List[Paper], Tuple[List[Paper], List[str]]]:
         """ (Docstring unchanged) """
-        result = await self._execute_with_retry(
-            self.s2.get_papers,
-            paper_ids=paper_ids,
-            fields=fields,
-            return_not_found=return_not_found
-        )
-        if result is None:
-             return ([], []) if return_not_found else []
-        # The original method might return (None, not_found_ids) if ALL fail
-        # Let's ensure the first element is a list
-        if return_not_found and isinstance(result, tuple):
-             papers_list = result[0] if result[0] is not None else []
-             return (papers_list, result[1])
-        elif not return_not_found and result is None:
-             return []
-        return result
+        paper_metadata, not_found_ids = [], []
+
+        paper_cnt = len(paper_ids)
+        if paper_cnt <= 0: 
+            if return_not_found:
+                return [], []
+            else:
+                return []
+
+        batch_size = self.batch_size
+        batch_cnt = math.ceil(paper_cnt / batch_size)
+        batches = [paper_ids[i * batch_size:(i + 1) * batch_size] for i in range(batch_cnt)]
+
+        tasks = []
+        logger.info(f"get_papers: Creating {len(batches)} tasks for {batch_cnt} IDs.")
+        for batch in batches:
+            tasks.append(self._execute_with_retry(
+                self.s2.get_papers,
+                paper_ids=batch,
+                fields=fields,
+                return_not_found=return_not_found
+            ))
+        
+        logger.info(f"get_papers: Gathering {len(tasks)} tasks...")
+        try:
+            # return_exceptions=True allows gather to complete even if some tasks fail
+            batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info(f"get_papers: Gather complete. Processing results.")
+
+            # Aggregate results, handling potential exceptions from gather
+            for idx, result in enumerate(batch_results_list):
+                if isinstance(result, Exception):
+                    # Error was already logged in _execute_sync_with_controls or the sync method
+                    logger.error(f"A batch task for get_papers failed: {result}")
+                    if return_not_found:
+                        not_found_ids.extend(batches[idx])
+                elif isinstance(result, list):
+                    if return_not_found and isinstance(result, tuple):
+                        papers_list = result[0] if result[0] is not None else []
+                        paper_metadata.extend(papers_list)
+                        not_found_ids.extend(result[1])
+                    elif not return_not_found and isinstance(result, list):
+                        paper_metadata.extend(result)
+                else:
+                    # Should not happen if _execute_sync_with_controls handles errors properly
+                    logger.warning(f"Unexpected result type {type(result)} from batch task: {result}")
+                    not_found_ids.extend(batches[idx])
+
+        except Exception as e:
+            # Catch potential errors in asyncio.gather itself (less common)
+            logger.error(f"get_papers: Exception during asyncio.gather: {e}", exc_info=True)
+            not_found_ids.extend(batches)
+        
+        if return_not_found:
+            return paper_metadata, not_found_ids
+        return paper_metadata
 
 
     async def get_paper_authors(
@@ -456,22 +499,63 @@ class SemanticScholarKit:
         return_not_found: bool = False
     ) -> Union[List[Author], Tuple[List[Author], List[str]]]:
         """ (Docstring unchanged) """
-        result = await self._execute_with_retry(
-            self.s2.get_authors,
-            author_ids=author_ids,
-            fields=fields,
-            return_not_found=return_not_found
-        )
-        # Similar handling as get_papers for consistency
-        if result is None:
-             return ([], []) if return_not_found else []
-        if return_not_found and isinstance(result, tuple):
-             authors_list = result[0] if result[0] is not None else []
-             return (authors_list, result[1])
-        elif not return_not_found and result is None:
-             return []
-        return result
+        author_metadata, not_found_ids = [], []
 
+        author_cnt = len(author_ids)
+        if author_cnt <= 0: 
+            if return_not_found:
+                return [], []
+            else:
+                return []
+
+        batch_size = self.batch_size
+        batch_cnt = math.ceil(author_cnt / batch_size)
+        batches = [author_ids[i * batch_size:(i + 1) * batch_size] for i in range(batch_cnt)]
+
+        tasks = []
+        logger.info(f"get_authors: Creating {len(batches)} tasks for {batch_cnt} IDs.")
+        for batch in batches:
+            tasks.append(self._execute_with_retry(
+                self.s2.get_authors,
+                author_ids=author_ids,
+                fields=fields,
+                return_not_found=return_not_found
+            ))
+        
+        logger.info(f"get_authors: Gathering {len(tasks)} tasks...")
+        try:
+            # return_exceptions=True allows gather to complete even if some tasks fail
+            batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info(f"get_authors: Gather complete. Processing results.")
+
+            # Aggregate results, handling potential exceptions from gather
+            for idx, result in enumerate(batch_results_list):
+                if isinstance(result, Exception):
+                    # Error was already logged in _execute_sync_with_controls or the sync method
+                    logger.error(f"A batch task for get_papers failed: {result}")
+                    if return_not_found:
+                        not_found_ids.extend(batches[idx])
+                elif isinstance(result, list):
+                    if return_not_found and isinstance(result, tuple):
+                        authors_list = result[0] if result[0] is not None else []
+                        author_metadata.extend(authors_list)
+                        not_found_ids.extend(result[1])
+                    elif not return_not_found and isinstance(result, list):
+                        author_metadata.extend(result)
+                else:
+                    # Should not happen if _execute_sync_with_controls handles errors properly
+                    logger.warning(f"Unexpected result type {type(result)} from batch task: {result}")
+                    not_found_ids.extend(batches[idx])
+
+        except Exception as e:
+            # Catch potential errors in asyncio.gather itself (less common)
+            logger.error(f"get_authors: Exception during asyncio.gather: {e}", exc_info=True)
+            not_found_ids.extend(batches)
+        
+        if return_not_found:
+            return author_metadata, not_found_ids
+        return author_metadata
+    
 
     async def get_author_papers(
         self,

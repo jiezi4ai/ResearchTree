@@ -1,590 +1,361 @@
-很好！在以上代码基础上，直接以paperId（即s2 id）为id，唯一识别paper，并去除paper_primary_id键。
-基于以上代码，请完成下述任务。
-
-## TASK
-以下函数尝试对收集semantic scholar的元数据，然后再进行处理，
-
-结合s2_data_process.py中的函数，请帮助完成以下任务：
-1.检查代码是否有误，如有错误，请详细说明；
-2.说明是否有其它优化项；
-3.最终给出修订和优化后的完整代码。
-
-```python
-import asyncio
-from typing import List, Dict, Optional, Union
-
-from semanticscholar.Paper import Paper
-from semanticscholar.Author import Author
-from semanticscholar.Reference import Reference
-
-import sys
-import os
-
-parent_dir = os.path.dirname(os.getcwd())
-sys.path.append(parent_dir)
-
-from apis.s2_api import SemanticScholarKit
-from collect.paper_data_process import process_papers_data, process_authors_data, process_citations_data, process_topics_data
-
-import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-class PaperSearch:
-    """
-    A class for exploring academic papers, optimized for asynchronous operations.
-    """
-    def __init__(
-            self,
-            # seed papers
-            seed_research_topics: Optional[List] = None,
-            seed_paper_titles: Optional[Union[List[str], str]] = None,
-            seed_paper_ids: Optional[Union[List[str], str]] = None,
-            # parameters
-            from_dt: Optional[str] = None,
-            to_dt: Optional[str] = None,
-            fields_of_study: Optional[List[str]] = None,
-            nodes_json: Optional[List[Dict]] = None,
-            edges_json: Optional[List[Dict]] = None, 
-            search_limit: Optional[int] = 50,
-            recommend_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100,
-            # instances
-            s2_instance: Optional[SemanticScholarKit] = None, 
-    ):
-        """Initialize PaperSearch parameters.
-        
-        """
-        # seed papers info
-        self.research_topics = seed_research_topics
-        self.seed_paper_titles = [seed_paper_titles] if isinstance(seed_paper_titles, str) and seed_paper_titles else seed_paper_titles if isinstance(seed_paper_titles, list) else []
-        self.seed_paper_ids = [seed_paper_ids] if isinstance(seed_paper_ids, str) and seed_paper_ids else seed_paper_ids if isinstance(seed_paper_ids, list) else []
-
-        self.search_limit = search_limit
-        self.recommend_limit = recommend_limit
-        self.citation_limit = citation_limit
-
-        # Filters
-        self.from_dt = from_dt
-        self.to_dt = to_dt
-        self.fields_of_study = fields_of_study
-
-        # State: Nodes and Edges
-        self.nodes_json = []
-        self._node_ids = set() 
-        if isinstance(nodes_json, list) and len(nodes_json) > 0:
-            self._add_items_json(nodes_json, source='initial')
-            
-        self.edges_json = []
-        self._edge_tuples = set()
-        if isinstance(edges_json, list) and len(edges_json) > 0:
-            self._add_items_json(edges_json, source='initial')
-
-        # store paper abstraction embeddings
-        self.abs_embed_ref = {}
-
-        # explored nodes
-        self.explored_nodes = {'topic':set(),   
-                               'author':set(),  
-                               'reference':set(),  
-                               'citing': set(),  
-                               'title': set(),  
-                               'paper':set(), 
-                               'recommendation':set(),  # papers for recommendations, format like ([pos_paper_ids], [neg_paper_ids])
-                               'paper_author': set(),  # search for all authors of a paper  
-                                }
-        
-        self.not_found_nodes = {'topic':set(), 
-                               'author':set(), 
-                               'reference':set(), 
-                               'citing': set(), 
-                               'title': set(), 
-                               'paper':set(), 
-                               'recommendation':set(),  
-                               'paper_author': set(),  
-                                }
-        
-        self.data_pool = {'paper': [],
-                          'author':[],
-                          'reference': [],
-                          'citing': [],
-                          'topic': []
-                         }
-
-        # initiate instances
-        self.s2 = s2_instance if s2_instance and isinstance(s2_instance, SemanticScholarKit) else SemanticScholarKit()
-
- 
-    ############################################################################
-    # paper collection functions
-    ############################################################################
-    async def paper_search(
-            self,
-            paper_titles: Optional[List]=[],
-            paper_ids: Optional[List]=[]  # accept dois, arxiv ids, s2 paper ids
-        ):
-        """aysnc search for paper dois and paper titles"""
-        papers_metadata = []
-
-        # --- 1. Process paper dois and titles ---
-        paper_titles = [x for x in paper_titles if x not in self.explored_nodes['title']]
-        paper_ids = [x for x in paper_ids if x not in self.explored_nodes['paper']]
-
-        if len(paper_titles) > 0 or len(paper_ids) > 0:
-            logging.info(f"Search {len(paper_titles)} paper titles and {len(paper_ids)} for paper information.")
-            # --- 2. Conduct search through semantic scholar ---
-            tasks_with_source = []
-            task_coroutines = []
-            
-            # Task for searching by DOIs
-            if paper_ids:  # id search returns list of papers
-                logging.info(f"Fetching papers by {len(paper_ids)} DOIs...")
-                coro = self.s2.get_papers(paper_ids=paper_ids)
-                tasks_with_source.append({'source':'id', 'values': paper_ids, 'result': coro})
-                task_coroutines.append(coro)
-            
-            if paper_titles: 
-                for title in paper_titles:  # title search returns a list of one single paper
-                    logging.info(f"Fetching papers by title: '{title}...'")
-                    coro = self.s2.search_paper(query=title, match_title=True)
-                    tasks_with_source.append({'source':'title', 'values':[title], 'result': coro})
-                    task_coroutines.append(coro)
-
-            # --- 3. Collect results data ---
-            # Run all initial query tasks concurrently
-            if task_coroutines:
-                logging.info(f"Running {len(task_coroutines)} paper query tasks concurrently...")
-                results = await asyncio.gather(*task_coroutines, return_exceptions=True)
-                # get results of paper metadata
-                if results is not None and len(results) > 0:
-                    for i, task_info in enumerate(tasks_with_source):
-                        source = task_info.get('source')
-                        values = task_info.get('values')
-                        result = results[i]
-                        # fails
-                        if isinstance(result, Exception):
-                            logging.error(f"Task for source '{source}' ({values}) failed: {result}", exc_info=result)
-                            if source == 'id':
-                                self.not_found_nodes['paper'].update(values)
-                            else:
-                                self.not_found_nodes['title'].update(values)
-                        # success
-                        elif result is not None:
-                            papers_metadata = [].extend(result)
-                        # None
-                        else:
-                            # Handle cases where the API might return None without an exception
-                            logging.warning(f"Task for source '{source}' ({values}) returned None.")
-                            if source == 'id':
-                                self.not_found_nodes['paper'].update(values)
-                            else:
-                                self.not_found_nodes['title'].update(values)
-                else:
-                    logging.warning("No paper query criteria (ID, Title) provided.")
-
-        # --- 4. Update global status ---
-        # update explored nodes
-        if len(paper_titles) > 0:
-            self.explored_nodes['title'].update(paper_titles)
-        if len(paper_ids) > 0:
-            self.explored_nodes['paper'].update(paper_ids)
-        
-        # add paper metadata to data pool
-        if len(papers_metadata) > 0:
-            papers_dict = [item.raw_data for item in papers_metadata if isinstance(item, Paper)]
-            self.data_pool['paper'].extend(papers_dict)
-
-
-    async def topic_search(
-            self,
-            topics: Optional[List]=[],
-            search_limit: Optional[int] = 50,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
-        ):
-        """async search over multiple topics for papers"""
-        # --- 1. Process topic to avoid duplicated search ---
-        topics = [x for x in topics if x not in self.explored_nodes['topic']]
-
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(topics) > 0:
-            logging.info(f"Search {len(topics)} topics for paper information.")
-            tasks = []
-            for topic in topics:
-                # each search on topic returns list of papers
-                tasks.append(self.s2.search_paper(
-                    query=topics,
-                    limit=search_limit, 
-                    publication_date_or_year=f"{from_dt}:{to_dt}", 
-                    fields_of_study=fields_of_study))
-                
-            # --- 3. Collect results data ---
-            if tasks:
-                logging.info(f"Running {len(tasks)} topic search tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['topic'] = topics[idx]
-                    elif isinstance(result, list):
-                        # add paper metadata to data pool
-                        papers_dict = [item.raw_data for item in result if isinstance(item, Paper)]
-                        self.data_pool['paper'].extend(papers_dict)
-                        # add topic metadata
-                        papers_ids = [paper['paperId'] for paper in papers_dict]
-                        for pid in papers_ids:
-                            self.data_pool['topic'].extend({'topic':topics[idx], 'paper_id': pid})
-
-        # --- 4. Update global status ---
-        # update explored nodes
-        if len(topics) > 0:
-            self.explored_nodes['topic'].update(topics)
-
-
-    async def authors_search(
-            self,
-            author_ids: Optional[List]=[],
-        ):
-        """async search for multiple authors with papers information"""
-        # --- 1. Process author ids to avoid duplicated search ---
-        author_ids = [x for x in author_ids if x not in self.explored_nodes['author']]
-
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(author_ids) > 0:
-            logging.info(f"Search {len(author_ids)} author information.")
-            # return a list of authors (with papers in each author)
-            authors_papers_metadata = await self.s2.get_authors(author_ids=author_ids)
-            
-        # --- 3. Update global status ---
-        # update explored nodes
-        if len(author_ids) > 0:
-            self.explored_nodes['author'].update(author_ids)
-        
-        # split authors and papers
-        if len(authors_papers_metadata) > 0:
-            for author_item in authors_papers_metadata:
-                if not isinstance(author_item, Author):
-                    continue
-                # access papers
-                if hasattr(author_item, 'papers') and len(author_item.papers):
-                    papers_dict = [paper_item.raw_data for paper_item in author_item.papers if isinstance(paper_item, Paper)]
-                    self.data_pool['paper'].extend(papers_dict)
-                # drop papers in author
-                author_dict = {
-                    k: v for k, v in author_item.raw_data.items()
-                    if k not in ['papers'] and v is not None
-                }
-                self.data_pool['author'].append(author_dict)
-
-
-    async def paper_author_search(
-            self,
-            paper_ids: str,
-            limit: int = 100,  # restrict # of authors
-            ):
-        """async search for one paper's multiple authors"""
-        authors_metadata = []
-        # --- 1. Process author ids to avoid duplicated search ---
-        paper_ids = [doi for doi in paper_ids if doi not in self.explored_nodes['paper_author']]
-
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(paper_ids) > 0:
-            logging.info(f"Search {len(paper_ids)}'s author information.")
-            tasks = []
-            for pid in paper_ids:
-                # return a list of authors (without papers information)
-                tasks.append(self.s2.get_paper_authors(paper_id=pid, limit=limit))
-            
-            # --- 3. Collect results data ---
-            # Run all query tasks concurrently
-            if tasks:
-                logging.info(f"Running {len(tasks)} author search for given papers query tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['paper_author'] = paper_ids[idx]
-                    elif isinstance(result, list):
-                        authors_metadata.extend(result)
-                    else:
-                        logging.warning(f"Task for paper '{paper_ids[idx]}' returned None.")
-                        self.not_found_nodes['paper_author'].add(paper_ids[idx])
-
-        # --- 4. Update global status ---
-        # update explored nodes
-        if len(paper_ids) > 0:
-            self.explored_nodes['paper_author'].update(paper_ids)
-        
-        # split authors and papers
-        if len(authors_metadata) > 0:
-            for author_item in authors_metadata:
-                if not isinstance(author_item, Author):
-                    continue
-                # drop papers in author
-                author_dict = {
-                    k: v for k, v in author_item.raw_data.items()
-                    if k not in ['papers'] and v is not None
-                }
-                self.data_pool['author'].append(author_dict)
-
-
-    async def reference_search(
-            self,
-            ref_paper_ids: List[str],
-            citation_limit: Optional[int] = 100,
-        ):
-        """citation search for reference information"""
-        # --- 1. Process paper dois to avoid duplicated search ---
-        ref_paper_ids = [x for x in ref_paper_ids if x not in self.explored_nodes['reference']]
-
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(ref_paper_ids) > 0:
-            tasks = []
-            logging.info(f"Preparing reference for {len(ref_paper_ids)} papers ...")
-            for pid in ref_paper_ids:
-                # return a list of references
-                tasks.append(self.s2.get_paper_references(paper_id=pid, limit=citation_limit))
-                
-            # --- 3. Collect results data ---
-            # Run all query tasks concurrently
-            if tasks:
-                logging.info(f"Running {len(tasks)} reference search tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['reference'] = ref_paper_ids[idx]
-                    elif isinstance(result, list) and len(result) > 0:
-                        for ref_item in result:
-                            if not isinstance(ref_item, Reference):
-                                continue
-                            # get paper
-                            paper = ref_item.citedPaper
-                            if isinstance(paper, Paper):
-                                self.data_pool['paper'].append(paper.raw_data)
-                                # drop papers in reference
-                                ref_dict = {
-                                    k: v for k, v in ref_item.raw_data.items()
-                                    if k not in ['citedPaper'] and v is not None
-                                }
-                                ref_dict['source_id'] = ref_paper_ids[idx]
-                                ref_dict['target_id'] = paper.paperId  # to be updated to doi
-                                ref_dict['citation_type'] = 'CITES'
-                                self.data_pool['reference'].append(ref_dict)
-                    else:
-                        logging.warning(f"Task for paper '{ref_paper_ids[idx]}' returned None.")
-                        self.not_found_nodes['reference'].add(ref_paper_ids[idx])
-
-        # --- 4. Update global status ---
-        # update explored nodes
-        if len(ref_paper_ids) > 0:
-            self.explored_nodes['reference'].update(ref_paper_ids)
-
-
-    async def citing_search(
-            self,
-            cit_paper_ids: Optional[List]=[],
-            citation_limit: Optional[int] = 100,
-        ):
-        """citation search for reference information"""
-        # --- 1. Process paper dois to avoid duplicated search ---
-        cit_paper_ids = [x for x in cit_paper_ids if x not in self.explored_nodes['citing']]
-
-        # --- 2. Conduct search via Semantic Scholar ---
-        if len(cit_paper_ids) > 0:
-            tasks = []
-            logging.info(f"Preparing citing for {len(cit_paper_ids)} papers ...")
-            for pid in cit_paper_ids:
-                # return a list of references
-                tasks.append(self.s2.get_paper_citations(paper_id=pid, limit=citation_limit))
-                
-            # --- 3. Collect results data ---
-            # Run all query tasks concurrently
-            if tasks:
-                logging.info(f"Running {len(tasks)} citing search tasks concurrently...")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logging.error(f"Related paper search task failed: {result}")
-                        self.not_found_nodes['citing'] = cit_paper_ids[idx]
-                    elif isinstance(result, list):
-                        for cit_item in result:
-                            if not isinstance(cit_item, Reference):
-                                continue
-                            # get paper
-                            paper = cit_item.citedPaper
-                            if isinstance(paper, Paper):
-                                self.data_pool['paper'].append(paper.raw_data)
-                            # drop papers in citing
-                            cit_dict = {
-                                k: v for k, v in cit_item.raw_data.items()
-                                if k not in ['citingPaper'] and v is not None
-                            }
-                            cit_dict['source_id'] = paper.paperId  # to be updated to doi
-                            cit_dict['target_id'] = cit_paper_ids[idx]
-                            cit_dict['citation_type'] = 'CITES'
-                            self.data_pool['citing'].append((cit_paper_ids[idx], 'citingPaper', cit_dict))
-                    else:
-                        logging.warning(f"Task for paper '{cit_paper_ids[idx]}' returned None.")
-                        self.not_found_nodes['citing'].add(cit_paper_ids[idx])
-
-        # --- 4. Update global status ---
-        # update explored nodes
-        if len(cit_paper_ids) > 0:
-            self.explored_nodes['citing'].update(cit_paper_ids)
-
-
-    async def paper_recommendation(
-            self,
-            pos_paper_ids: List[str],
-            neg_paper_ids: Optional[List] = [],
-            recommend_limit: Optional[int] = 100,
-        ):
-        """paper recommendations based on posiive paper dois and negtive paper dois"""
-        # --- 1. Get recommend papers from Semantic Scholar ---
-        if len(pos_paper_ids) > 0:
-            logging.info(f"Recommend papers based on {len(pos_paper_ids)} positive papers and {len(neg_paper_ids)} papers.")
-            papers_metadata = await self.s2.get_recommended_papers_from_lists(
-                positive_paper_ids=pos_paper_ids,
-                negative_paper_ids=neg_paper_ids,
-                limit=recommend_limit)
-
-        # --- 3. Update global status ---
-        # update explored nodes
-        if len(pos_paper_ids) > 0:
-            self.explored_nodes['recommendation'].add((tuple(sorted(pos_paper_ids)), tuple(sorted(neg_paper_ids))))
-
-        # add paper metadata to data pool
-        if len(papers_metadata) > 0:
-            papers_dict = [item.raw_data for item in papers_metadata if isinstance(item, Paper)]
-            self.data_pool['paper'].extend(papers_dict)
-
-
-    ############################################################################
-    # paper consolidated search
-    ############################################################################
-    async def consolidated_search(
-            self,
-            # for paper / author info
-            topics: Optional[List]=[],
-            paper_titles: Optional[List]=[],
-            paper_ids: Optional[List]=[],
-            author_ids: Optional[List]=[],
-            # for citation info
-            ref_paper_ids: Optional[List]=[],
-            citing_paper_ids: Optional[List]=[],
-            # for S2 recommendations
-            pos_paper_ids: Optional[List] = [],
-            neg_paper_ids: Optional[List] = [],
-            # search params
-            search_limit: Optional[int] = 50,
-            citation_limit: Optional[int] = 100,
-            recommend_limit: Optional[int] = 100,
-            from_dt: Optional[str]="2000-01-01",
-            to_dt: Optional[str]="9999-12-31",
-            fields_of_study: Optional[List] = None
-        ):
-        """consolidate paper search, author search, citation search and paper recommendations"""
-        tasks = []       
-
-        if len(paper_titles) > 0 or len(paper_ids) > 0:
-            tasks.append(self.paper_search(paper_titles, paper_ids))
-        
-        if len(author_ids) > 0:
-            tasks.append(self.authors_search(author_ids))
-        
-        if len(ref_paper_ids) > 0:
-            tasks.append(self.reference_search(ref_paper_ids, citation_limit))
-
-        if len(citing_paper_ids) > 0:
-            tasks.append(self.citing_search(citing_paper_ids, citation_limit))
-
-        if len(pos_paper_ids) > 0:
-            tasks.append(self.paper_recommendation(pos_paper_ids, neg_paper_ids, recommend_limit))
-
-        if len(topics) > 0:
-            tasks.append(self.topic_search(topics, search_limit, from_dt, to_dt, fields_of_study))  
-
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            if len(results) > 0:
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        # help track error information
-                        logging.error(f"A sub-task in consolidated_search failed: {result}", exc_info=True)
-
-
-    ############################################################################
-    # paper search results post processing
-    ############################################################################
-    async def supplement_abstract(
-            self, 
-            paper_ids:Union[List[str], str]):
-        """search from Semantic Scholar for paper abstract information"""
-        if isinstance(paper_ids, str):
-            paper_ids = [paper_ids]
-
-        if len(paper_ids) > 0:
-            logging.info(f"Fetching {len(paper_ids)} papers for abstracts ...")
-            papers_abstract_info = await self.s2.get_papers(paper_ids=paper_ids, fields=['paperId', 'abstract'])
-            papers_abstract_ref = {item['paperId']:item['abstract'] for item in papers_abstract_info}
-            return papers_abstract_ref
-        else:
-            return {}
-
-    async def post_process(
-            self,
-            if_supplement_abstract: Optional[bool] = True,  # whether add abstract information
-            ):
-        """post process collected paper metadata"""
-        nodes_edges_json = []
-
-        if len(self.data_pool['paper']) > 0:
-            papers_json = process_papers_data(self.data_pool['paper'])
-
-            # supplement abstract for papers
-            if if_supplement_abstract:
-                null_abstract_ids = []
-                for item in papers_json:
-                    if (item.get('type') == 'node' and item.get('label') == ['Paper'] 
-                        and item.get('properties', {}).get('abstract') is None):
-                        null_abstract_ids.append(item['id'])
-
-                papers_abstract_ref = await self.supplement_abstract(null_abstract_ids)
-                for item in papers_json:
-                    if item.get('type') == 'node' and item.get('label') == ['Paper']:
-                        pid = item['id']
-                        abstract = papers_abstract_ref.get(pid)
-                        if abstract is not None:
-                            item['properties']['abstract'] = abstract
-            
-            nodes_edges_json.extend(papers_json)
-
-        if len(self.data_pool['author']) > 0:
-            authors_json = process_authors_data(self.data_pool['author'])
-            nodes_edges_json.extend(authors_json)
-
-        if len(self.data_pool['topic']) > 0:
-            topics_json = process_topics_data(self.data_pool['topic'])
-            nodes_edges_json.extend(topics_json)
-
-        if len(self.data_pool['reference']) > 0:
-            references_json = process_citations_data(self.data_pool['reference'])
-            nodes_edges_json.extend(references_json)
-
-        if len(self.data_pool['citing']) > 0:
-            citings_json = process_citations_data(self.data_pool['citing'])
-            nodes_edges_json.extend(citings_json)
-
-        # allow duplication in nodes and edges, would dedup in later stage
-        for item_json in nodes_edges_json:
-            if item.get('type') == 'node':
-                self.nodes_json.append(item_json)
-            elif item.get('type') == 'relationship':
-                self.edges_json.append(item_json)
-
-```
-
-请一步一步思考，并给出答案。
-请使用英文思考，最终使用中文做答。
+2025-04-28 16:21:05,279 - SemanticScholarKit - INFO - consolidated_search: Starting...
+2025-04-28 16:21:05,279 - INFO - consolidated_search: Starting...
+2025-04-28 16:21:05,280 - SemanticScholarKit - INFO - consolidated_search: Running 5 sub-tasks concurrently...
+2025-04-28 16:21:05,280 - INFO - consolidated_search: Running 5 sub-tasks concurrently...
+2025-04-28 16:21:05,282 - INFO - topic_search: Searching 4 topics.
+2025-04-28 16:21:05,282 - INFO - topic_search: Running 4 topic search tasks concurrently...
+2025-04-28 16:21:05,283 - INFO - authors_search: Searching 33 authors.
+2025-04-28 16:21:05,284 - SemanticScholarKit - INFO - get_authors: Creating 1 tasks for 1 IDs.
+2025-04-28 16:21:05,284 - INFO - get_authors: Creating 1 tasks for 1 IDs.
+2025-04-28 16:21:05,285 - SemanticScholarKit - INFO - get_authors: Gathering 1 tasks...
+2025-04-28 16:21:05,285 - INFO - get_authors: Gathering 1 tasks...
+2025-04-28 16:21:05,286 - INFO - reference_search: Fetching references for 5 papers (limit per paper: 100).
+2025-04-28 16:21:05,287 - INFO - reference_search: Running 5 reference search tasks concurrently...
+2025-04-28 16:21:05,288 - INFO - citing_search: Fetching citations for 5 papers (limit per paper: 100).
+2025-04-28 16:21:05,288 - INFO - Preparing citing for 5 papers ...
+2025-04-28 16:21:05,289 - INFO - citing_search: Running 5 citation search tasks concurrently...
+2025-04-28 16:21:05,289 - INFO - paper_recommendation: Fetching 100 recommendations based on 5 positive and 0 negative papers.
+2025-04-28 16:21:06,385 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,389 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,390 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20peer%20review%20systems%20evaluation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,391 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=LLM%20automated%20literature%20review%20generation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,391 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,391 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,393 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,394 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,396 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,396 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,399 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,399 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,403 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'LLM automated literature revie...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,403 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'LLM automated literature revie...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,408 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,408 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,409 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,409 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,421 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/citations?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:06,422 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/citations?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:06,431 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=knowledge%20graph%20based%20scientific%20idea%20generation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,432 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20driven%20research%20support%20systems%20survey&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,433 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:06,434 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'knowledge graph based scientif...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,434 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'knowledge graph based scientif...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,434 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI driven research support sys...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,434 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI driven research support sys...'). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,435 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,435 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 1/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:06,473 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/citations?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:06,605 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/citations?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:06,775 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/citations?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:07,191 - INFO - HTTP Request: POST https://api.semanticscholar.org/graph/v1/author/batch?fields=affiliations%2CauthorId%2CcitationCount%2CexternalIds%2ChIndex%2Chomepage%2Cname%2CpaperCount%2Cpapers%2Cpapers.abstract%2Cpapers.authors%2Cpapers.citationCount%2Cpapers.corpusId%2Cpapers.externalIds%2Cpapers.fieldsOfStudy%2Cpapers.influentialCitationCount%2Cpapers.isOpenAccess%2Cpapers.journal%2Cpapers.openAccessPdf%2Cpapers.paperId%2Cpapers.publicationDate%2Cpapers.publicationTypes%2Cpapers.publicationVenue%2Cpapers.referenceCount%2Cpapers.s2FieldsOfStudy%2Cpapers.title%2Cpapers.url%2Cpapers.venue%2Cpapers.year%2Curl "HTTP/1.1 200 OK"
+2025-04-28 16:21:07,300 - WARNING - citing_search: Task for paper '69b53faee7ce5c007e4d3e3ea532818ed8d0645d' returned no results or failed silently.
+2025-04-28 16:21:07,301 - WARNING - citing_search: Task for paper 'cdb34c0092a767848ca1de6fa7e3a6b822585fa4' returned no results or failed silently.
+2025-04-28 16:21:07,302 - INFO - citing_search: Added 73 new unique citing papers and 73 citation relationships.
+2025-04-28 16:21:08,964 - SemanticScholarKit - INFO - get_authors: Gather complete. Processing results.
+2025-04-28 16:21:08,964 - INFO - get_authors: Gather complete. Processing results.
+2025-04-28 16:21:08,966 - INFO - authors_search: Added 33 new authors and 1183 new papers to data pool.
+2025-04-28 16:21:10,862 - INFO - HTTP Request: POST https://api.semanticscholar.org/recommendations/v1/papers/?fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:11,205 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,208 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,208 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,406 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20peer%20review%20systems%20evaluation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,410 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,410 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,453 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,456 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20driven%20research%20support%20systems%20survey&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,457 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,458 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,460 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:11,461 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,461 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,464 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI driven research support sys...'). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,464 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI driven research support sys...'). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,465 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,465 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,466 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,466 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,467 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:11,467 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 2/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:12,686 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=LLM%20automated%20literature%20review%20generation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:13,123 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=knowledge%20graph%20based%20scientific%20idea%20generation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:15,653 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,658 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,658 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,672 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20peer%20review%20systems%20evaluation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,674 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,674 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,689 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,691 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,691 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,702 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,704 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,704 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,751 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,753 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,753 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,782 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:15,784 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:15,784 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 3/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:17,310 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20driven%20research%20support%20systems%20survey&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:19,423 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,428 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,428 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,433 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,435 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,435 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,445 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,447 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,447 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,478 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20peer%20review%20systems%20evaluation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,481 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,481 - WARNING - Rate limit (429) hit (via RetryError) for search_paper (ID/Query/URL: query:'AI peer review systems evaluat...'). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,497 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,500 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,500 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,506 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:19,508 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:19,508 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 4/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,202 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:23,205 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:23,207 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:23,209 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,209 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,211 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,211 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,213 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,213 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,243 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:23,245 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,245 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,292 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:23,294 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:23,294 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 5/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:24,577 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/search?query=AI%20peer%20review%20systems%20evaluation&fieldsOfStudy=Computer%20Science&publicationDateOrYear=2020-01-01%3A2025-04-30&fields=abstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:21:25,442 - INFO - topic_search: Added 395 new papers and 400 topic links to data pool.
+2025-04-28 16:21:26,989 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:26,992 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:26,994 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:26,994 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:26,996 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:26,996 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,029 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:27,031 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,031 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,035 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:27,036 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,036 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,074 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:27,076 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:27,076 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 6/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,773 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:30,777 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:30,779 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,779 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,781 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,781 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,811 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:30,813 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:30,815 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:30,816 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,816 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,817 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,817 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,819 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:30,819 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 7/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,574 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:34,576 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,576 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,584 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:34,585 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:34,585 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,585 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,587 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,587 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,623 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:34,624 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,624 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,632 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:34,633 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:34,633 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 8/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,335 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:38,339 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,339 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,355 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:38,357 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:38,359 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,359 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,361 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,361 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,383 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:38,384 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:38,386 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,386 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,387 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:38,387 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 9/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,132 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:42,133 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,133 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,145 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:42,146 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:42,147 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,147 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,151 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,151 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,193 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:42,195 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,195 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,243 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:42,244 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:42,244 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 10/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,865 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:45,867 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,867 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,913 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:45,915 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:45,916 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,916 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,917 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,917 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,934 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:45,935 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:45,935 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:46,033 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:46,034 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:46,034 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 11/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,633 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:49,636 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,636 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,674 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:49,675 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:49,676 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,676 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,677 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,677 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,722 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:49,723 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,723 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,773 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:49,775 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:49,775 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 12/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,409 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:53,414 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,414 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,425 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:53,428 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:53,431 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,431 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,432 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,432 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,454 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:53,456 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,456 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,504 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:53,506 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:53,506 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 69b53faee7ce5c007e4d3e3ea532818ed8d0645d). Underlying tenacity retries failed. Attempting outer retry 13/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,185 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:57,187 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:57,189 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:57,190 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,190 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,192 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,192 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,194 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,194 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,226 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:21:57,228 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,228 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 14/21. Retrying after 3.0 seconds...
+2025-04-28 16:21:57,846 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/69b53faee7ce5c007e4d3e3ea532818ed8d0645d/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 200 OK"
+2025-04-28 16:22:01,105 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:01,106 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:01,107 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,107 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,108 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,108 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,144 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:01,146 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:01,148 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,148 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,150 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:01,150 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 15/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,866 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:04,867 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,867 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,913 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:04,914 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:04,916 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,916 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,917 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,917 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,965 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:04,967 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:04,967 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 16/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,617 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:08,622 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,622 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,668 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:08,672 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,672 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,675 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:08,677 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,677 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,701 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:08,703 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:08,703 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 17/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,415 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:12,417 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:12,418 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:12,421 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,421 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,422 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,422 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,423 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,423 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,426 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:12,427 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:12,427 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 18/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,290 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:16,298 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:16,301 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:16,304 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:16,305 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,305 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,308 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,308 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,310 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,310 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,312 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:16,312 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 19/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,128 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:20,129 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:20,133 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:20,134 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,134 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,136 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,136 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,138 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,138 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,146 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:20,148 - SemanticScholarKit - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:20,148 - WARNING - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Underlying tenacity retries failed. Attempting outer retry 20/21. Retrying after 3.0 seconds...
+2025-04-28 16:22:23,924 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9e57dda195973c4b6c81386b1cc44595ecfd4697/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:23,926 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/a6aed0c4e0f39a55edb407f492e41f178a62907f/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:23,927 - SemanticScholarKit - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,927 - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9e57dda195973c4b6c81386b1cc44595ecfd4697). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,928 - SemanticScholarKit - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,928 - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: a6aed0c4e0f39a55edb407f492e41f178a62907f). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,976 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/cdb34c0092a767848ca1de6fa7e3a6b822585fa4/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:23,976 - INFO - HTTP Request: GET https://api.semanticscholar.org/graph/v1/paper/9f3ae8055e227edb413c54417c9c216f1f554f52/references?fields=contexts%2Cintents%2CcontextsWithIntent%2CisInfluential%2Cabstract%2Cauthors%2CcitationCount%2CcitationStyles%2CcorpusId%2CexternalIds%2CfieldsOfStudy%2CinfluentialCitationCount%2CisOpenAccess%2Cjournal%2CopenAccessPdf%2CpaperId%2CpublicationDate%2CpublicationTypes%2CpublicationVenue%2CreferenceCount%2Cs2FieldsOfStudy%2Ctitle%2Curl%2Cvenue%2Cyear&offset=0&limit=100 "HTTP/1.1 429 "
+2025-04-28 16:22:23,978 - SemanticScholarKit - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,978 - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: cdb34c0092a767848ca1de6fa7e3a6b822585fa4). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,978 - SemanticScholarKit - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,978 - ERROR - Rate limit (429) hit (via RetryError) for get_paper_references (ID/Query/URL: 9f3ae8055e227edb413c54417c9c216f1f554f52). Max outer retries (20) exceeded after underlying tenacity retries failed.
+2025-04-28 16:22:23,979 - INFO - reference_search: Retrieving reference for paper '69b53faee7ce5c007e4d3e3ea532818ed8d0645d'
+2025-04-28 16:22:23,980 - ERROR - reference_search: Task for paper 'a6aed0c4e0f39a55edb407f492e41f178a62907f' failed: RetryError[<Future at 0x12b997700 state=finished raised ConnectionRefusedError>]
+2025-04-28 16:22:23,980 - ERROR - reference_search: Task for paper '9f3ae8055e227edb413c54417c9c216f1f554f52' failed: RetryError[<Future at 0x163eb6fe0 state=finished raised ConnectionRefusedError>]
+2025-04-28 16:22:23,981 - ERROR - reference_search: Task for paper 'cdb34c0092a767848ca1de6fa7e3a6b822585fa4' failed: RetryError[<Future at 0x163eb58a0 state=finished raised ConnectionRefusedError>]
+2025-04-28 16:22:23,981 - ERROR - reference_search: Task for paper '9e57dda195973c4b6c81386b1cc44595ecfd4697' failed: RetryError[<Future at 0x163eb2c20 state=finished raised ConnectionRefusedError>]
+2025-04-28 16:22:23,981 - INFO - reference_search: Added 100 new unique referenced papers and 100 reference relationships.
+2025-04-28 16:22:23,982 - SemanticScholarKit - INFO - consolidated_search: Sub-tasks finished.
+2025-04-28 16:22:23,982 - INFO - consolidated_search: Sub-tasks finished.
+2025-04-28 16:22:23,982 - SemanticScholarKit - INFO - consolidated_search: Finished.
+2025-04-28 16:22:23,982 - INFO - consolidated_search: Finished.

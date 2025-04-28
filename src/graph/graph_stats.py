@@ -29,14 +29,14 @@ def get_graph_stats(graph):
     return graph_stats
 
 
-def get_paper_stats(graph, seed_paper_dois):
+def get_paper_stats(graph, seed_paper_ids):
     """get paper statistic in paper graph"""
     papers_stats = []
     for nid, node_data in graph.nodes(data=True):
         if node_data.get('nodeType') == 'Paper':
             # paper infos
             title = graph.nodes[nid].get('title')
-            if_seed = True if nid in seed_paper_dois else False  # exclude seed papers
+            if_seed = True if nid in seed_paper_ids else False  # exclude seed papers
             overall_cite_cnt = node_data.get('citationCount')
             overall_inf_cite_cnt = node_data.get('influentialCitationCount')
             overall_ref_cnt = node_data.get('influentialCitationCount')
@@ -51,7 +51,7 @@ def get_paper_stats(graph, seed_paper_dois):
                     local_citation_cnt += 1
                 elif edge_data.get('relationshipType') == 'SIMILAR_TO':
                     sim_cnt_1 += 1
-                    if u in seed_paper_dois:
+                    if u in seed_paper_ids:
                         if edge_data.get('weight') > max_sim_to_seed_1:
                             max_sim_to_seed_1 = edge_data.get('weight')
 
@@ -65,7 +65,7 @@ def get_paper_stats(graph, seed_paper_dois):
                     local_ref_cnt += 1
                 elif edge_data.get('relationshipType') == 'SIMILAR_TO':
                     sim_cnt_2 += 1
-                    if v in seed_paper_dois:
+                    if v in seed_paper_ids:
                         if edge_data.get('weight') > max_sim_to_seed_2:
                             max_sim_to_seed_2 = edge_data.get('weight')
 
@@ -89,7 +89,7 @@ def get_paper_stats(graph, seed_paper_dois):
                 avg_h_index = None
                 weight_h_index = None
 
-            paper_stats = {"doi":nid, "title":title, "if_seed": if_seed,
+            paper_stats = {"paper_id":nid, "title":title, "if_seed": if_seed,
                            "local_citation_cnt":local_citation_cnt, "local_reference_cnt": local_ref_cnt, 
                            "local_similarity_cnt":sim_cnt_1+sim_cnt_2, "max_sim_to_seed":max(max_sim_to_seed_1, max_sim_to_seed_2),
                            "global_citaion_cnt":overall_cite_cnt, "influencial_citation_cnt":overall_inf_cite_cnt, "global_refence_cnt": overall_ref_cnt,

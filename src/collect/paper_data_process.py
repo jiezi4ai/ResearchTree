@@ -29,6 +29,163 @@ def generate_hash_key(input_string):
   return hex_dig
 
 
+def identify_academic_id(input_id: str) -> Optional[Dict[str, str]]:
+    """
+    Identifies the type of academic identifier and returns it in a structured format.
+    Strips prefixes, URLs, and version info (for arXiv new format IDs).
+
+    Args:
+        input_id: The identifier string to check.
+
+    Returns:
+        A dictionary {'identifier_type': 'cleaned_id'} if identified,
+        e.g., {'doi': '10.1234/abc'}, {'arxiv_id': '1503.02531'},
+        or None if the type cannot be determined or input is invalid.
+        Identifier types: 'doi', 'arxiv_id', 's2_paper_id', 's2_corpus_id', 'openalex_work_id'.
+    """
+    if not isinstance(input_id, str) or not input_id.strip():
+        return None # Return None for invalid input
+
+    input_id = input_id.strip()
+
+    # --- Normalization and Prefix/URL Stripping ---
+    # Define common prefixes and URL bases. Order matters for nested prefixes.
+    prefixes = {
+        "https://doi.org/": "DOI",
+        "http://doi.org/": "DOI",
+        "doi:": "DOI",
+        "https://arxiv.org/abs/": "arXiv",
+        "http://arxiv.org/abs/": "arXiv",
+        "arxiv:": "arXiv",
+        "https://www.semanticscholar.org/paper/": "S2 Paper ID",
+        "https://www.semanticscholar.org/corpusid/": "S2 Corpus ID",
+        "corpusid:": "S2 Corpus ID",
+        "https://openalex.org/": "OpenAlex Work ID", # e.g., /Wxxxxx
+        "openalex:": "OpenAlex Work ID",
+    }
+
+    stripped_id = input_id
+    detected_type_from_prefix = None
+
+    lower_input = input_id.lower()
+    for prefix, id_type in prefixes.items():
+        if lower_input.startswith(prefix):
+            potential_id_part = input_id[len(prefix):]
+            detected_type_from_prefix = id_type
+
+            # Attempt to extract the core ID from the remaining path/string
+            if id_type == "DOI":
+                stripped_id = potential_id_part
+            elif id_type == "arXiv":
+                # Keep the *entire* part after the prefix for regex matching.
+                stripped_id = potential_id_part
+            elif id_type == "S2 Paper ID":
+                # S2 Paper ID is a 40-char hex string, often last in the URL path
+                parts = [p for p in potential_id_part.split('/') if p]
+                if parts:
+                    if re.fullmatch(r'[0-9a-f]{40}', parts[-1], re.IGNORECASE):
+                        stripped_id = parts[-1]
+                    elif len(parts) == 1 and re.fullmatch(r'[0-9a-f]{40}', parts[0], re.IGNORECASE):
+                         stripped_id = parts[0]
+                    else:
+                         stripped_id = potential_id_part
+                else:
+                    stripped_id = potential_id_part
+            elif id_type == "S2 Corpus ID":
+                # S2 Corpus ID is a number, often the first part after /corpusid/
+                parts = [p for p in potential_id_part.split('/') if p]
+                if parts and parts[0].isdigit():
+                    stripped_id = parts[0]
+                elif potential_id_part.isdigit():
+                     stripped_id = potential_id_part
+                else:
+                    stripped_id = potential_id_part
+            elif id_type == "OpenAlex Work ID":
+                 # OpenAlex ID starts with 'W'
+                 parts = [p for p in potential_id_part.split('/') if p]
+                 if parts and parts[0].upper().startswith('W') and parts[0][1:].isdigit():
+                     stripped_id = parts[0]
+                 elif potential_id_part.upper().startswith('W') and potential_id_part[1:].isdigit():
+                     stripped_id = potential_id_part
+                 else:
+                    stripped_id = potential_id_part
+
+            break # Stop after finding the first matching prefix
+
+    # --- ID Format Checks (Order: Specific -> General) ---
+
+    # 1. DOI Check
+    if re.match(r'^10\.\d+/.+', stripped_id):
+        if '/' in stripped_id and stripped_id.split('/', 1)[1]:
+             # DOI doesn't typically have version info to strip in the identifier itself
+             return {'doi': stripped_id}
+
+    # 2. OpenAlex Work ID
+    # Standardize 'W' to uppercase
+    if re.fullmatch(r'W\d{9,}', stripped_id, re.IGNORECASE):
+         return {'openalex_work_id': stripped_id.upper()}
+
+    # 3. Semantic Scholar Paper ID
+    # Standardize hex to lowercase
+    if re.fullmatch(r'[0-9a-f]{40}', stripped_id, re.IGNORECASE):
+        return {'s2_paper_id': stripped_id.lower()}
+
+    # 4. arXiv ID (New or Old format)
+    # Check New format and strip version if present
+    # Use groups: group(1) is the ID, group(2) is the optional version part
+    new_format_match = re.fullmatch(r'(\d{4}\.\d{4,5})(v\d+)?', stripped_id)
+    if new_format_match:
+        cleaned_id = new_format_match.group(1) # Get the ID part without version
+        return {'arxiv_id': cleaned_id}
+
+    # Check Old format (no standard version marker to strip)
+    if re.fullmatch(r'[a-z-]+(?:\.[A-Z]{2})?/\d{7}', stripped_id, re.IGNORECASE):
+         if '/' in stripped_id and len(stripped_id.split('/')[-1]) == 7 and stripped_id.split('/')[-1].isdigit():
+            # Preserve case for category as it might be significant
+            return {'arxiv_id': stripped_id}
+
+    # 5. Semantic Scholar Corpus ID (Integer)
+    # Check last as it's the most ambiguous format
+    if stripped_id.isdigit():
+        # Check if prefix stripping already suggested this type
+        if detected_type_from_prefix == "S2 Corpus ID":
+             return {'s2_corpus_id': stripped_id}
+        # Otherwise, accept if numeric and long enough (avoids single digits)
+        if len(stripped_id) >= 2:
+             return {'s2_corpus_id': stripped_id}
+
+    # --- Fallback ---
+    # Return None if no type matched or input was invalid
+    return None
+
+
+def arxiv_id_to_doi(arxiv_id: str) -> Optional[str]:
+    """
+    convert arxiv id to doi (remove version info)
+
+    Args:
+        arxiv_id (str): arXiv id, like: "2303.12345", "math/0101001", "cond-mat/9706300v1"。
+
+    Returns:
+        str: standard doi like: "10.48550/arXiv.2303.12345", "10.48550/arXiv.math/0101001"。
+             return None for invalid input
+    """
+    if not isinstance(arxiv_id, str) or not arxiv_id.strip():
+        print("Input must be string.")
+        return None
+
+    doi_prefix_part = "10.48550/arXiv."
+
+    cleaned_id = arxiv_id.strip()
+    # remove version info
+    cleaned_id = re.sub(r'v\d+$', '', cleaned_id)
+
+    # generate new doi
+    doi = doi_prefix_part + cleaned_id
+
+    return doi
+
+
 def align_paper_metadata(s2_papers_metadata: List[Dict]|Dict) -> List[Dict]:
     """
     Pre-processes Semantic Scholar paper metadata.

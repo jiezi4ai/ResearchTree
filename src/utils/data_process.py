@@ -6,10 +6,10 @@ from typing import List, Dict, Optional
 from thefuzz import fuzz # pip install thefuzz  https://github.com/seatgeek/thefuzz
 
 def generate_hash_key(input_string):
-  """使用 SHA-256 哈希生成唯一的 key。"""
-  encoded_string = input_string.encode('utf-8')  # 将字符串编码为字节
+  """generate hash key using sha256"""
+  encoded_string = input_string.encode('utf-8')  
   hash_object = hashlib.sha256(encoded_string)
-  hex_dig = hash_object.hexdigest()  # 获取十六进制表示的哈希值
+  hex_dig = hash_object.hexdigest() 
   return hex_dig
 
 
@@ -19,7 +19,7 @@ def remove_non_text_chars(text, with_digits: Optional[bool]=True):
     """
     valid_chars = string.ascii_letters
     if with_digits == True:
-        valid_chars += string.digits  # 包含所有字母和数字的字符串
+        valid_chars += string.digits  # include all chars and digits
     cleaned_text = ''
     for char in text:
         if char in valid_chars:
