@@ -1,0 +1,105 @@
+    def cal_p2p_similarity(
+            self,
+            paper_nodes_json: List,
+            paper_dois_1: List, 
+            paper_dois_2: List,
+            similarity_threshold,
+            ):
+        """calculate paper to paper similarity and filter based on similarity_threshold"""
+        semantic_similar_pool = []
+        publish_dt_ref = {x['id']:x['properties'].get('publicationDate')
+                        for x in paper_nodes_json if x['properties'].get('publicationDate') is not None}
+
+        # Filter embeddings for each list
+        embeds_ref_1 = {key: val for key, val in self.abs_embed_ref.items() if key in paper_dois_1}
+        embeds_ref_2 = {key: val for key, val in self.abs_embed_ref.items() if key in paper_dois_2}
+
+        # --- Start: Add Robustness Checks ---
+        ids_1 = list(embeds_ref_1.keys())
+        ids_2 = list(embeds_ref_2.keys())
+        embed_values_1 = list(embeds_ref_1.values())
+        embed_values_2 = list(embeds_ref_2.values())
+
+        if not embed_values_1 or not embed_values_2:
+            logging.warning(f"Cannot calculate similarity. "
+                            f"Found {len(embed_values_1)} valid embeddings for list 1 (IDs: {ids_1}) and "
+                            f"{len(embed_values_2)} for list 2 (IDs: {ids_2}). "
+                            f"Check if input DOIs exist and have title/abstract.")
+            return [] # Return empty list as no similarity can be calculated
+        # --- End: Add Robustness Checks ---
+
+        embeds_1 = np.array(embed_values_1)
+        embeds_2 = np.array(embed_values_2)
+
+        # Add logging for shapes *before* the calculation
+        logging.info(f"Shape of embeds_1: {embeds_1.shape}")
+        logging.info(f"Shape of embeds_2: {embeds_2.shape}")
+
+        logging.info("Calculating similarity matrix...")
+        try:
+            # Assuming semantic_similarity_matrix handles potential normalization etc.
+            # It likely computes cosine similarity: (embeds_1 @ embeds_2.T) / (norm(embeds_1) * norm(embeds_2))
+            sim_matrix = semantic_similarity_matrix(embeds_1, embeds_2)
+            sim_matrix = np.array(sim_matrix) # Ensure it's a numpy array if not already
+        except Exception as e:
+            # Log the shapes again in case of error
+            logging.error(f"Similarity matrix calculation failed with embeds_1 shape {embeds_1.shape} and embeds_2 shape {embeds_2.shape}: {e}")
+            return [] # Return empty list on failure
+
+        logging.info("Processing similarity matrix to create relationships...")
+        rows, cols = sim_matrix.shape
+        added_pairs = set()
+
+        # --- Small optimization/correction in loop ---
+        if rows > 0 and cols > 0:
+            # Ensure sim_matrix shape matches expectation: (len(ids_1), len(ids_2))
+            if sim_matrix.shape != (len(ids_1), len(ids_2)):
+                logging.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(ids_1)}, {len(ids_2)})")
+                return []
+
+            for i in range(rows):      # Iterate through papers in list 1
+                id_i = ids_1[i]
+                publish_dt_i = publish_dt_ref.get(id_i)
+                if publish_dt_i is None: # Skip if no publication date for comparison
+                    continue
+
+                for j in range(cols):  # Iterate through papers in list 2
+                    id_j = ids_2[j]
+                    # Avoid self-comparison if the lists could overlap and contain the same ID
+                    if id_i == id_j:
+                        continue
+
+                    sim = sim_matrix[i, j]
+                    if sim > similarity_threshold:
+                        publish_dt_j = publish_dt_ref.get(id_j)
+                        if publish_dt_j is None: # Skip if no publication date for comparison
+                            continue
+
+                        # Determine start/end based on publication date
+                        if publish_dt_i <= publish_dt_j:
+                            start_node_id = id_i
+                            end_node_id = id_j
+                        else:
+                            start_node_id = id_j
+                            end_node_id = id_i
+
+                        # Create unique tuple for the pair (order matters for the relationship direction)
+                        pair_tuple = (start_node_id, end_node_id)
+
+                        if pair_tuple not in added_pairs:
+                            edge = {
+                                "type": "relationship",
+                                "relationshipType": "SIMILAR_TO",
+                                "startNodeId": start_node_id,
+                                "endNodeId": end_node_id,
+                                "properties": {
+                                    'source': 'semantic similarity',
+                                    'weight': round(float(sim), 4),
+                                }
+                            }
+                            semantic_similar_pool.append(edge)
+                            added_pairs.add(pair_tuple) # Store the directed pair
+        else:
+            logging.info("Similarity matrix is empty, no relationships to process.")
+
+        return semantic_similar_pool

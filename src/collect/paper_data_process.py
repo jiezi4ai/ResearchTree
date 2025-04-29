@@ -21,6 +21,19 @@ REL_CITES = "CITES"
 REL_DISCUSS = "DISCUSS"
 
 
+import logging
+# Configure logging
+logger = logging.getLogger('Paper Data Process')
+# Prevent duplicate handlers if the root logger is already configured
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+# Set default level (can be overridden by user)
+logger.setLevel(logging.INFO) 
+
+
 def generate_hash_key(input_string):
   """Generate hash key using SHA-256 algorithm"""
   encoded_string = input_string.encode('utf-8') 
@@ -171,7 +184,7 @@ def arxiv_id_to_doi(arxiv_id: str) -> Optional[str]:
              return None for invalid input
     """
     if not isinstance(arxiv_id, str) or not arxiv_id.strip():
-        print("Input must be string.")
+        logger.error("Input must be string.")
         return None
 
     doi_prefix_part = "10.48550/arXiv."
@@ -207,13 +220,13 @@ def align_paper_metadata(s2_papers_metadata: List[Dict]|Dict) -> List[Dict]:
     for item in s2_papers_metadata:
         if not isinstance(item, dict):
             # Handle cases where item is not a dictionary (e.g., log a warning)
-            print(f"Warning: Skipping non-dictionary item in align_paper_metadata: {item}")
+            logger.warning(f"Warning: Skipping non-dictionary item in align_paper_metadata: {item}")
             continue
 
         s2_paper_id = item.get('paperId')
         if s2_paper_id is None:
             # Skip papers without a Semantic Scholar paperId
-            print(f"Warning: Skipping paper due to missing 'paperId': {item.get('title', 'N/A')}")
+            logger.warning(f"Warning: Skipping paper due to missing 'paperId': {item.get('title', 'N/A')}")
             continue
 
         # --- Determine IDs (doi, arxiv_id, unique id) ---
@@ -319,7 +332,7 @@ def process_papers_data(
     for item in aligned_papers_dict:
         paper_id = item.get('id')
         if paper_id is None:
-            print(f"Warning: Skipping paper due to missing of primary id: {item.get('title', 'N/A')}")
+            logger.warning(f"Warning: Skipping paper due to missing of primary id: {item.get('title', 'N/A')}")
             continue # Skip if no primary ID was assigned
 
         # --- Process Paper Node ---
@@ -488,12 +501,12 @@ def process_authors_data(
 
     for author_item in s2_authors:
         if not isinstance(author_item, dict):
-            print(f"Warning: Skipping non-dictionary item in process_authors_data: {author_item}")
+            logger.warning(f"Warning: Skipping non-dictionary item in process_authors_data: {author_item}")
             continue
 
         author_id = author_item.get('authorId')
         if author_id is None:
-            print(f"Warning: Skipping author due to missing 'authorId': {author_item.get('name', 'N/A')}")
+            logger.warning(f"Warning: Skipping author due to missing 'authorId': {author_item.get('name', 'N/A')}")
             continue
 
         # --- Process Author Node ---
@@ -604,14 +617,14 @@ def process_citations_data(
 
     for item in s2_citations:
         if not isinstance(item, dict):
-             print(f"Warning: Skipping non-dictionary item in process_citations_data: {item}")
+             logger.warning(f"Warning: Skipping non-dictionary item in process_citations_data: {item}")
              continue
 
         start_node_id = item.get('source_id') # ID of the citing paper
         end_node_id = item.get('target_id')   # ID of the cited paper
 
         if not start_node_id or not end_node_id:
-            print(f"Warning: Skipping citation due to missing source/target ID: {item}")
+            logger.warning(f"Warning: Skipping citation due to missing source/target ID: {item}")
             continue
 
         citation_props = {k: v for k, v in item.items()
@@ -660,11 +673,11 @@ def process_topics_data(
 
     for item in topics_data:
         if not isinstance(item, dict):
-            print(f"Warning: Skipping non-dictionary item in process_topics_data: {item}")
+            logger.warning(f"Warning: Skipping non-dictionary item in process_topics_data: {item}")
             continue
 
         topic_name = item.get('topic')
-        # IMPORTANT: Use the same primary ID as generated for the paper node
+        topic_desc = item.get('description')
         paper_id = item.get('paperId') # Changed from 's2id'
 
         if topic_name and topic_name.strip() and paper_id:
@@ -675,6 +688,7 @@ def process_topics_data(
                     topic_props = {
                         'topic_hash_id': topic_hash_id,
                         'name': topic_name, 
+                        'description': topic_desc,
                         'hash_method': 'hashlib.sha256'
                         }
                     topic_node = {
@@ -702,7 +716,133 @@ def process_topics_data(
                     topics_json.append(paper_topic_relationship)
                     _edge_tuples.add(edge_tuple)
         else:
-             print(f"Warning: Skipping topic item due to missing topic name or paper id: {item}")
+             logger.warning(f"Warning: Skipping topic item due to missing topic name or paper id: {item}")
 
 
     return topics_json
+
+
+def process_p2t_similarity_data(
+        paper_ids,
+        topic_ids,
+        sim_matrix, 
+        similarity_threshold: Optional[float] = 0.7
+        ):
+        """Process paper similarity data to edges
+        newer paper -> SIMILAR_TO -> older paper
+        """
+        semantic_similar_pool = []
+
+        # -----  2. Iterate similarity matrix ----------
+        rows, cols = sim_matrix.shape
+        added_pairs = set()
+
+        if rows > 0 and cols > 0:
+            # Ensure sim_matrix shape matches expectation: (len(ids_1), len(ids_2))
+            if sim_matrix.shape != (len(paper_ids), len(topic_ids)):
+                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(ids_1)}, {len(ids_2)})")
+                return []
+
+            for i in range(rows):      # Iterate through papers in list 1
+                id_i = paper_ids[i]
+
+                for j in range(cols):  # Iterate through papers in list 2
+                    id_j = topic_ids[j]
+
+                    sim = sim_matrix[i, j]
+                    if sim > similarity_threshold:
+                        start_node_id = id_i
+                        end_node_id = id_j
+
+                        # -----  3. Generate similarity to edge json ----------
+                        # Create unique tuple for the pair (order matters for the relationship direction)
+                        pair_tuple = (start_node_id, end_node_id)
+                        if pair_tuple not in added_pairs:
+                            edge = {
+                                "type": "relationship",
+                                "relationshipType": "DISCUSS",
+                                "startNodeId": start_node_id,
+                                "endNodeId": end_node_id,
+                                "properties": {
+                                    'source': 'semantic similarity',
+                                    'weight': round(float(sim), 4),
+                                }
+                            }
+                            semantic_similar_pool.append(edge)
+                            added_pairs.add(pair_tuple) # Store the directed pair
+        else:
+            logger.warning("Similarity matrix is empty, no relationships to process.")
+
+
+def process_p2p_sim_data(
+        paper_nodes_json,
+        paper_ids_1,
+        paper_ids_2,
+        sim_matrix, 
+        similarity_threshold: Optional[float] = 0.7
+        ):
+        """Process paper similarity data to edges
+        newer paper -> SIMILAR_TO -> older paper
+        """
+        semantic_similar_pool = []
+
+        # -----  1. Get paper rank by publish date ----------
+        # rank order paper id by publish date
+        paper_publish_dt = {x['id']:x['properties']['publicationDate'] for x in paper_nodes_json 
+                          if x.get('properties', {}).get('publicationDate') is not None}
+        paper_publish_dt_sorted = sorted(paper_publish_dt.items(), key=lambda x:x[1], reverse=True)
+        
+        # generate paper rank by publish date (from newest to oldest)
+        paper_ids_by_dt = {}
+        for index, (key, value) in enumerate(paper_publish_dt_sorted):
+            paper_ids_by_dt[key] = index
+
+        # -----  2. Iterate similarity matrix ----------
+        rows, cols = sim_matrix.shape
+        added_pairs = set()
+
+        if rows > 0 and cols > 0:
+            # Ensure sim_matrix shape matches expectation: (len(ids_1), len(ids_2))
+            if sim_matrix.shape != (len(paper_ids_1), len(paper_ids_2)):
+                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(ids_1)}, {len(ids_2)})")
+                return []
+
+            for i in range(rows):      # Iterate through papers in list 1
+                id_i = paper_ids_1[i]
+                pos_i = paper_ids_by_dt.get(id_i)
+
+                for j in range(cols):  # Iterate through papers in list 2
+                    id_j = paper_ids_2[j]
+                    pos_j = paper_ids_by_dt.get(id_j)
+                    # Avoid self-comparison if the lists could overlap and contain the same ID
+                    if id_i == id_j:
+                        continue
+
+                    sim = sim_matrix[i, j]
+                    if sim > similarity_threshold:
+                        # Determine start/end based on publication date
+                        if pos_i <= pos_j:
+                            start_node_id = id_i
+                            end_node_id = id_j
+                        else:
+                            start_node_id = id_j
+                            end_node_id = id_i
+
+                        # -----  3. Generate similarity to edge json ----------
+                        # Create unique tuple for the pair (order matters for the relationship direction)
+                        pair_tuple = (start_node_id, end_node_id)
+                        if pair_tuple not in added_pairs:
+                            edge = {
+                                "type": "relationship",
+                                "relationshipType": "SIMILAR_TO",
+                                "startNodeId": start_node_id,
+                                "endNodeId": end_node_id,
+                                "properties": {
+                                    'source': 'semantic similarity',
+                                    'weight': round(float(sim), 4),
+                                }
+                            }
+                            semantic_similar_pool.append(edge)
+                            added_pairs.add(pair_tuple) # Store the directed pair
+        else:
+            logger.warning("Similarity matrix is empty, no relationships to process.")

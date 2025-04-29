@@ -27,11 +27,11 @@ from collect.paper_data_find import PaperFinder
 from models.llms import async_llm_gen_w_retry
 from collect.paper_data_process import (process_papers_data, process_authors_data, 
                                         process_citations_data, process_topics_data)
-from prompts.query_prompt import keywords_topics_example, keywords_topics_prompt
+from prompts.query_prompt import query_example, query_prompt
 
 import logging
 # Configure logging
-logger = logging.getLogger('SemanticScholarKit')
+logger = logging.getLogger('PaperCollector')
 # Prevent duplicate handlers if the root logger is already configured
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
@@ -53,66 +53,51 @@ async def llm_gen_topics(
         ) -> Optional[Dict]:
     """Generate related topics using LLM asynchronously."""
     logger.info(f"Generating related topics for {len(paper_json)} seed papers...")
-    # Use existing node data, assuming initial query ran
     nodes_dict = {node['id']: node for node in paper_json}
-    seed_paper_ids = [node['id'] for node in paper_json]
-    domains, seed_paper_texts = [], []
+    paper_ids = [node['id'] for node in paper_json]
+    paper_texts = []
 
-    for paper_id in seed_paper_ids:
-        item = nodes_dict.get(paper_id)
+    for pid in paper_ids:
+        item = nodes_dict.get(pid)
         if item and item['labels'] == ['Paper']:
             title = item['properties'].get('title')
             abstract = item['properties'].get('abstract')
-            domain_list = item['properties'].get('fieldsOfStudy', []) # Default to empty list
             if title and abstract:
                 info = f"<paper> {title}\n{abstract} </paper>"
-                seed_paper_texts.append(info)
-            if domain_list: # Check if list is not empty
-                domains.extend(domain_list)
+                paper_texts.append(info)
         else:
-                logger.warning(f"Seed paper ID {paper_id} not found or not a Paper node.")
+            logger.warning(f"Seed paper ID {pid} not found or not a Paper node.")
 
-    if not seed_paper_texts:
+    if not paper_texts:
         logger.error("No text found for seed papers to generate topics.")
         return {}
-    if not domains:
-        logger.warning("No domains found for seed papers, using 'General Science'.")
-        domain = "General Science"
-    else:
-        # Get the most frequent domain
-        domain_counts = Counter(domains)
-        if not domain_counts: # Handle empty counter if domains list was empty
-            domain = "General Science"
-        else:
-            domain = domain_counts.most_common(1)[0][0]
 
     # LLM call (assumed async)
-    qa_prompt = keywords_topics_prompt.format(
-        domain=domain,
-        example_json=keywords_topics_example,
-        input_text="\n\n".join(seed_paper_texts)
+    qa_prompt = query_prompt.format(
+        example_json=query_example,
+        input_text="\n\n".join(paper_texts)
     )
     logger.info("Calling LLM to generate topics...")
     try:
         # Assuming llm_gen_w_retry is async
-        keywords_topics_info = await async_llm_gen_w_retry(llm_api_key, llm_model_name, qa_prompt, sys_prompt=None, temperature=0.6)
-        if not keywords_topics_info:
+        queries_info = await async_llm_gen_w_retry(llm_api_key, llm_model_name, qa_prompt, sys_prompt=None, temperature=0.6)
+        if not queries_info:
                 logger.error("LLM returned empty response for topic generation.")
                 return {}
 
         # Repair and parse JSON
-        repaired_json_str = repair_json(keywords_topics_info)
-        keywords_topics_json = json.loads(repaired_json_str)
-        logger.info(f"LLM generated topics: {json.dumps(keywords_topics_json)}")
+        repaired_json_str = repair_json(queries_info)
+        queries_json = json.loads(repaired_json_str)
+        logger.info(f"LLM generated topics: {json.dumps(queries_json)}")
 
     except json.JSONDecodeError as e:
-        logger.error(f"LLM Topic Generation - JSON Repair/Decode Error: {e}. Original output: {keywords_topics_info}")
+        logger.error(f"LLM Topic Generation - JSON Repair/Decode Error: {e}. Original output: {queries_json}")
         return {}
     except Exception as e:
         logger.error(f"Error during LLM topic generation or processing: {e}")
         return {}
 
-    return keywords_topics_json
+    return queries_json
 
 
 class PaperCollector(PaperFinder):
@@ -176,16 +161,20 @@ class PaperCollector(PaperFinder):
             ):
         """use LLM to generate related topics based on seed paper information"""
         logging.info("Use LLM to identify key related topics.")
-        keywords_topics_json = await llm_gen_topics(paper_json, llm_api_key, llm_model_name)
-        query_topics = keywords_topics_json.get('queries', []) 
+        queries_json = await llm_gen_topics(paper_json, llm_api_key, llm_model_name)
         paper_ids = [item['id'] for item in paper_json]
 
-        if not query_topics or not paper_ids:
+        if not queries_json or not paper_ids:
             return
 
-        for topic in set(query_topics):
+        for item in queries_json:
+            topic = item.get('query')
+            description = item.get('description')
             for pid in set(paper_ids):
-                self.data_pool['topic'].append({'topic': topic, 'paperId': pid})
+                self.data_pool['topic'].append({
+                    'topic': topic, 
+                    'description': description, 
+                    'paperId': pid})
 
 
     ############################################################################
