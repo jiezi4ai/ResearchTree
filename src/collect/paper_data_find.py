@@ -20,8 +20,16 @@ sys.path.append(parent_dir)
 from apis.s2_api import SemanticScholarKit
 
 import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+# Configure logging
+logger = logging.getLogger('Paper Collector')
+# Prevent duplicate handlers if the root logger is already configured
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+# Set default level (can be overridden by user)
+logger.setLevel(logging.INFO) 
 
 NODE_PAPER = "Paper"
 NODE_AUTHOR = "Author"
@@ -123,10 +131,10 @@ class PaperFinder:
         ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['paper']]
 
         if not titles_to_search and not ids_to_search:
-            logging.info("paper_search: No new titles or IDs to search.")
+            logger.info("paper_search: No new titles or IDs to search.")
             return
     
-        logging.info(f"Search {len(paper_titles)} paper titles and {len(paper_ids)} for paper information.")
+        logger.info(f"Search {len(paper_titles)} paper titles and {len(paper_ids)} for paper information.")
         
         # --- 2. Create search tasks ---
         tasks_with_source = []
@@ -134,14 +142,14 @@ class PaperFinder:
 
         # Task for searching by IDs (S2 get_papers handles various ID types)
         if ids_to_search:
-            logging.info(f"paper_search: Creating task for {len(ids_to_search)} IDs...")
+            logger.info(f"paper_search: Creating task for {len(ids_to_search)} IDs...")
             coro = self.s2.get_papers(paper_ids=ids_to_search) # S2 handles resolution
             tasks_with_source.append({'source': 'id', 'values': ids_to_search, 'result': coro})
             task_coroutines.append(coro)
 
         # Tasks for searching by titles (one task per title)
         if titles_to_search:
-            logging.info(f"paper_search: Creating {len(titles_to_search)} tasks for titles...")
+            logger.info(f"paper_search: Creating {len(titles_to_search)} tasks for titles...")
             for title in titles_to_search:
                 coro = self.s2.search_paper(query=title, limit=5, match_title=True) # Limit results for title match
                 tasks_with_source.append({'source': 'title', 'values': [title], 'result': coro})
@@ -149,7 +157,7 @@ class PaperFinder:
 
         # --- 3. Execute tasks and collect results ---
         if task_coroutines:
-            logging.info(f"paper_search: Running {len(task_coroutines)} query tasks concurrently...")
+            logger.info(f"paper_search: Running {len(task_coroutines)} query tasks concurrently...")
             results = await asyncio.gather(*task_coroutines, return_exceptions=True)
 
             if results:
@@ -159,7 +167,7 @@ class PaperFinder:
                     result = results[i]
 
                     if isinstance(result, Exception):
-                        logging.error(f"paper_search: Task for source '{source}' ({values}) failed: {result}", exc_info=False) # Reduce noise
+                        logger.error(f"paper_search: Task for source '{source}' ({values}) failed: {result}", exc_info=False) # Reduce noise
                         self.not_found_nodes[source].update(values)
 
                     elif result is not None:
@@ -171,13 +179,13 @@ class PaperFinder:
                         
                     else:
                         # Handle cases where the API might return None without an exception
-                        logging.warning(f"Task for source '{source}' ({values}) returned None.")
+                        logger.warning(f"Task for source '{source}' ({values}) returned None.")
                         if source == 'id':
                             self.not_found_nodes['paper'].update(values)
                         else:
                             self.not_found_nodes['title'].update(values)
             else:
-                logging.warning("No paper query criteria (ID, Title) provided.")
+                logger.warning("No paper query criteria (ID, Title) provided.")
 
         # --- 4. Update global status ---
         # update explored nodes
@@ -208,10 +216,10 @@ class PaperFinder:
         # --- 1. Filter ---
         topics_to_search = [t for t in topics if t and t not in self.explored_nodes['topic']]
         if not topics_to_search:
-            logging.info("topic_search: No new topics to search.")
+            logger.info("topic_search: No new topics to search.")
             return
 
-        logging.info(f"topic_search: Searching {len(topics_to_search)} topics.")
+        logger.info(f"topic_search: Searching {len(topics_to_search)} topics.")
 
         # --- 2. Create tasks ---
         tasks = []
@@ -231,7 +239,7 @@ class PaperFinder:
 
         # --- 3. Execute and collect ---
         if tasks:
-            logging.info(f"topic_search: Running {len(tasks)} topic search tasks concurrently...")
+            logger.info(f"topic_search: Running {len(tasks)} topic search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
             new_papers_count = 0
             new_topic_links = 0
@@ -240,7 +248,7 @@ class PaperFinder:
             for idx, result in enumerate(results):
                 current_topic = topics_to_search[idx]
                 if isinstance(result, Exception):
-                    logging.error(f"topic_search: Task for topic '{current_topic}' failed: {result}", exc_info=False)
+                    logger.error(f"topic_search: Task for topic '{current_topic}' failed: {result}", exc_info=False)
                     self.not_found_nodes['topic'].add(current_topic)
 
                 elif isinstance(result, PaginatedResults) and hasattr(result, '_items') and result._items:
@@ -259,10 +267,10 @@ class PaperFinder:
                         self.data_pool['topic'].append({'topic': current_topic, 'paperId': pid})
                         new_topic_links += 1
                 else:
-                    logging.warning(f"topic_search: Task for topic '{current_topic}' returned no results or failed silently.")
+                    logger.warning(f"topic_search: Task for topic '{current_topic}' returned no results or failed silently.")
                     self.not_found_nodes['topic'].add(current_topic) # Mark as not found if no results
 
-            logging.info(f"topic_search: Added {new_papers_count} new papers and {new_topic_links} topic links to data pool.")
+            logger.info(f"topic_search: Added {new_papers_count} new papers and {new_topic_links} topic links to data pool.")
 
         # --- 4. Update status ---
         self.explored_nodes['topic'].update(topics_to_search)
@@ -280,10 +288,10 @@ class PaperFinder:
         # --- 1. Filter ---
         ids_to_search = [aid for aid in author_ids if aid and aid not in self.explored_nodes['author']]
         if not ids_to_search:
-            logging.info("authors_search: No new author IDs to search.")
+            logger.info("authors_search: No new author IDs to search.")
             return
 
-        logging.info(f"authors_search: Searching {len(ids_to_search)} authors.")
+        logger.info(f"authors_search: Searching {len(ids_to_search)} authors.")
 
         # --- 2. Conduct search (one call for multiple authors) ---
         # return a list of authors (with papers in each author)
@@ -325,7 +333,7 @@ class PaperFinder:
 
                 # Mark this author ID as explored successfully
                 self.explored_nodes['author'].add(current_author_id)
-            logging.info(f"authors_search: Added {new_authors_count} new authors and {new_papers_count} new papers to data pool.")
+            logger.info(f"authors_search: Added {new_authors_count} new authors and {new_papers_count} new papers to data pool.")
 
         # --- 4. Update status ---
         # Update explored nodes for those initially requested but not found in results 
@@ -348,10 +356,10 @@ class PaperFinder:
         # --- 1. Filter ---
         ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['paper_author']]
         if not ids_to_search:
-            logging.info("paper_author_search: No new paper IDs to search for authors.")
+            logger.info("paper_author_search: No new paper IDs to search for authors.")
             return
         
-        logging.info(f"paper_author_search: Searching authors for {len(ids_to_search)} papers.")
+        logger.info(f"paper_author_search: Searching authors for {len(ids_to_search)} papers.")
         
         # --- 2. Create tasks ---
         tasks = []
@@ -362,13 +370,13 @@ class PaperFinder:
         # --- 3. Execute and collect ---
         authors_metadata: List[Any] = []
         if tasks:
-            logging.info(f"paper_author_search: Running {len(tasks)} author search tasks concurrently...")
+            logger.info(f"paper_author_search: Running {len(tasks)} author search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for idx, result in enumerate(results):
                 current_paper_id = ids_to_search[idx]
                 if isinstance(result, Exception):
-                    logging.error(f"paper_author_search: Task for paper '{current_paper_id}' failed: {result}", exc_info=False)
+                    logger.error(f"paper_author_search: Task for paper '{current_paper_id}' failed: {result}", exc_info=False)
                     self.not_found_nodes['paper_author'].add(current_paper_id)
                 
                 elif isinstance(result, PaginatedResults) and hasattr(result, '_items') and result._items: # Result is PaginatedResult
@@ -377,7 +385,7 @@ class PaperFinder:
                     authors_metadata.extend(result)
                 
                 else:
-                    logging.warning(f"paper_author_search: Task for paper '{current_paper_id}' returned no results or failed silently.")
+                    logger.warning(f"paper_author_search: Task for paper '{current_paper_id}' returned no results or failed silently.")
                     self.not_found_nodes['paper_author'].add(current_paper_id) # Mark as not found
 
         # --- 4. Update global status ---
@@ -404,10 +412,10 @@ class PaperFinder:
         # --- 1. Filter ---
         ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['reference']]
         if not ids_to_search:
-            logging.info("reference_search: No new paper IDs to search for references.")
+            logger.info("reference_search: No new paper IDs to search for references.")
             return
 
-        logging.info(f"reference_search: Fetching references for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
+        logger.info(f"reference_search: Fetching references for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
 
         # --- 2. Conduct search via Semantic Scholar ---
         tasks = []
@@ -419,17 +427,17 @@ class PaperFinder:
         papers_added_count = 0
         rels_added_count = 0
         if tasks:
-            logging.info(f"reference_search: Running {len(tasks)} reference search tasks concurrently...")
+            logger.info(f"reference_search: Running {len(tasks)} reference search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for idx, result in enumerate(results):
                 source_paper_id = ids_to_search[idx] # The paper whose references we are fetching
                 if isinstance(result, Exception):
-                    logging.error(f"reference_search: Task for paper '{source_paper_id}' failed: {result}", exc_info=False)
+                    logger.error(f"reference_search: Task for paper '{source_paper_id}' failed: {result}", exc_info=False)
                     self.not_found_nodes['reference'] = source_paper_id
 
                 elif isinstance(result, PaginatedResults) and result._items:
-                    logging.info(f"reference_search: Retrieving reference for paper '{source_paper_id}'")
+                    logger.info(f"reference_search: Retrieving reference for paper '{source_paper_id}'")
                     for ref_item in result._items:
                         if not isinstance(ref_item, Reference) or not hasattr(ref_item, 'raw_data'): continue
 
@@ -449,13 +457,13 @@ class PaperFinder:
                             self.data_pool['reference'].append(ref_dict)
                             rels_added_count += 1
                         else:
-                            logging.debug(f"reference_search: Skipping reference from {source_paper_id} - missing valid citedPaper object: {ref_item.raw_data.get('citedPaper')}")
+                            logger.debug(f"reference_search: Skipping reference from {source_paper_id} - missing valid citedPaper object: {ref_item.raw_data.get('citedPaper')}")
 
                 else:
-                    logging.warning(f"reference_search: Task for paper '{source_paper_id}' returned no results or failed silently.")
+                    logger.warning(f"reference_search: Task for paper '{source_paper_id}' returned no results or failed silently.")
                     self.not_found_nodes['reference'].add(source_paper_id)
 
-            logging.info(f"reference_search: Added {papers_added_count} new unique referenced papers and {rels_added_count} reference relationships.")
+            logger.info(f"reference_search: Added {papers_added_count} new unique referenced papers and {rels_added_count} reference relationships.")
 
         # --- 4. Update global status ---
         self.explored_nodes['reference'].update(ids_to_search)
@@ -475,14 +483,14 @@ class PaperFinder:
         # --- 1. Filter ---
         ids_to_search = [pid for pid in paper_ids if pid and pid not in self.explored_nodes['citing']]
         if not ids_to_search:
-            logging.info("citing_search: No new paper IDs to search for citations.")
+            logger.info("citing_search: No new paper IDs to search for citations.")
             return
 
-        logging.info(f"citing_search: Fetching citations for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
+        logger.info(f"citing_search: Fetching citations for {len(ids_to_search)} papers (limit per paper: {citation_limit}).")
 
         # --- 2. Create tasks ---
         tasks = []
-        logging.info(f"Preparing citing for {len(ids_to_search)} papers ...")
+        logger.info(f"Preparing citing for {len(ids_to_search)} papers ...")
         for pid in ids_to_search:
             # return a list of references
             tasks.append(self.s2.get_paper_citations(paper_id=pid, limit=citation_limit))
@@ -492,13 +500,13 @@ class PaperFinder:
         rels_added_count = 0
         # Run all query tasks concurrently
         if tasks:
-            logging.info(f"citing_search: Running {len(tasks)} citation search tasks concurrently...")
+            logger.info(f"citing_search: Running {len(tasks)} citation search tasks concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for idx, result in enumerate(results):
                 target_paper_id = ids_to_search[idx] # The paper being cited
                 if isinstance(result, Exception):
-                    logging.error(f"citing_search: Task for paper '{target_paper_id}' failed: {result}", exc_info=False)
+                    logger.error(f"citing_search: Task for paper '{target_paper_id}' failed: {result}", exc_info=False)
                     self.not_found_nodes['citing'].add(target_paper_id)
 
                 elif isinstance(result, PaginatedResults) and result._items:
@@ -521,13 +529,13 @@ class PaperFinder:
                             self.data_pool['citing'].append(cit_dict)
                             rels_added_count += 1
                         else:
-                            logging.debug(f"citing_search: Skipping citation for {target_paper_id} - missing valid citingPaper object: {cit_item.raw_data.get('citingPaper')}")
+                            logger.debug(f"citing_search: Skipping citation for {target_paper_id} - missing valid citingPaper object: {cit_item.raw_data.get('citingPaper')}")
                             
                 else:
-                    logging.warning(f"citing_search: Task for paper '{target_paper_id}' returned no results or failed silently.")
+                    logger.warning(f"citing_search: Task for paper '{target_paper_id}' returned no results or failed silently.")
                     self.not_found_nodes['citing'].add(target_paper_id)
 
-            logging.info(f"citing_search: Added {papers_added_count} new unique citing papers and {rels_added_count} citation relationships.")
+            logger.info(f"citing_search: Added {papers_added_count} new unique citing papers and {rels_added_count} citation relationships.")
 
         # --- 4. Update global status ---
         # update explored nodes
@@ -551,10 +559,10 @@ class PaperFinder:
 
         # --- 1. Filter ---
         if not pos_paper_ids:
-            logging.error("paper_recommendation: No positive paper IDs provided.")
+            logger.error("paper_recommendation: No positive paper IDs provided.")
             return
 
-        logging.info(f"paper_recommendation: Fetching {recommend_limit} recommendations based on {len(pos_paper_ids)} positive and {len(neg_paper_ids)} negative papers.")
+        logger.info(f"paper_recommendation: Fetching {recommend_limit} recommendations based on {len(pos_paper_ids)} positive and {len(neg_paper_ids)} negative papers.")
         
         # --- 2. Get recommend papers ---
         # search returns a list of papers

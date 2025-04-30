@@ -647,7 +647,7 @@ def process_citations_data(
     
 
 def process_topics_data(
-        topics_data: List[dict],
+        topics_data: Union[List[Dict], Dict],
         existing_nodes: Optional[Set[str]] = None,
         existing_edges: Optional[Set[Tuple[str, str, str]]] = None
         ) -> List[Dict]:
@@ -722,7 +722,7 @@ def process_topics_data(
     return topics_json
 
 
-def process_p2t_similarity_data(
+def process_p2t_sim_data(
         paper_ids,
         topic_ids,
         sim_matrix, 
@@ -740,7 +740,7 @@ def process_p2t_similarity_data(
         if rows > 0 and cols > 0:
             # Ensure sim_matrix shape matches expectation: (len(ids_1), len(ids_2))
             if sim_matrix.shape != (len(paper_ids), len(topic_ids)):
-                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(ids_1)}, {len(ids_2)})")
+                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(paper_ids)}, {len(topic_ids)})")
                 return []
 
             for i in range(rows):      # Iterate through papers in list 1
@@ -773,6 +773,8 @@ def process_p2t_similarity_data(
         else:
             logger.warning("Similarity matrix is empty, no relationships to process.")
 
+        return semantic_similar_pool
+
 
 def process_p2p_sim_data(
         paper_nodes_json,
@@ -804,7 +806,7 @@ def process_p2p_sim_data(
         if rows > 0 and cols > 0:
             # Ensure sim_matrix shape matches expectation: (len(ids_1), len(ids_2))
             if sim_matrix.shape != (len(paper_ids_1), len(paper_ids_2)):
-                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(ids_1)}, {len(ids_2)})")
+                logger.error(f"Similarity matrix shape {sim_matrix.shape} does not match expected shape ({len(paper_ids_1)}, {len(paper_ids_2)})")
                 return []
 
             for i in range(rows):      # Iterate through papers in list 1
@@ -846,3 +848,5 @@ def process_p2p_sim_data(
                             added_pairs.add(pair_tuple) # Store the directed pair
         else:
             logger.warning("Similarity matrix is empty, no relationships to process.")
+
+        return semantic_similar_pool

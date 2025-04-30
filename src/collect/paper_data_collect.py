@@ -31,7 +31,7 @@ from prompts.query_prompt import query_example, query_prompt
 
 import logging
 # Configure logging
-logger = logging.getLogger('PaperCollector')
+logger = logging.getLogger('Paper Collector')
 # Prevent duplicate handlers if the root logger is already configured
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
@@ -74,9 +74,8 @@ async def llm_gen_topics(
 
     # LLM call (assumed async)
     qa_prompt = query_prompt.format(
-        example_json=query_example,
-        input_text="\n\n".join(paper_texts)
-    )
+        query_example = query_example,
+        input_text = "\n\n".join(paper_texts))
     logger.info("Calling LLM to generate topics...")
     try:
         # Assuming llm_gen_w_retry is async
@@ -160,22 +159,33 @@ class PaperCollector(PaperFinder):
             llm_model_name: str
             ):
         """use LLM to generate related topics based on seed paper information"""
+        # --- Generate topics (as query) from existing papers ---
         logging.info("Use LLM to identify key related topics.")
         queries_json = await llm_gen_topics(paper_json, llm_api_key, llm_model_name)
         paper_ids = [item['id'] for item in paper_json]
 
         if not queries_json or not paper_ids:
-            return
+            return 
 
+        # --- Associate topics with existing papers ---
+        topics_json = []
         for item in queries_json:
             topic = item.get('query')
             description = item.get('description')
             for pid in set(paper_ids):
-                self.data_pool['topic'].append({
+                topic_json = {
                     'topic': topic, 
                     'description': description, 
-                    'paperId': pid})
+                    'paperId': pid}
+                topics_json = process_topics_data(topic_json)
+                self.data_pool['topic'].append(topic_json)
 
+        # --- Add topics json as nodes / edges ---
+        for item_json in topics_json:
+            if item_json.get('type') == 'node':
+                self.nodes_json.append(item_json)
+            elif item_json.get('type') == 'relationship':
+                self.edges_json.append(item_json)
 
     ############################################################################
     # paper consolidated search

@@ -1,4 +1,5 @@
 
+import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import List, Dict, Optional, Union, Any, Set, Tuple
@@ -10,7 +11,33 @@ parent_dir = os.path.dirname(os.getcwd())
 sys.path.append(parent_dir)
 
 from graph.paper_graph import PaperGraph
-from collect.paper_similarity_calculation import PaperSim
+from collect.paper_sim_calc import PaperSim
+
+
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+import numpy as np
+
+
+def graph_basic_stats(node_stats: Dict):
+    """calculate key stats index for node stats"""
+    node_stats_index = {}
+    for key, values in node_stats.items():
+        if key == 'id': continue  # skip id
+
+        valid_values = [v for v in values if isinstance(v, (int, float))] # 只处理数值类型
+        if valid_values:
+            node_stats_index[key] = {
+                'min': np.min(valid_values),
+                'max': np.max(valid_values),
+                'average': np.mean(valid_values),
+                'median': np.median(valid_values),
+                'quantile_25': np.percentile(valid_values, 25),
+                'quantile_75': np.percentile(valid_values, 75)
+            }
+        else:
+            node_stats_index[key] = {}  
+    return node_stats_index
 
 
 class PaperRouter:
@@ -27,16 +54,19 @@ class PaperRouter:
         self.edges_json = edges_json
         
         # initiate semantic scholar instances
-        if sim_cal and isinstance(sim_cal, PaperSim):
-            self.sim_cal = sim_cal  
+        if paper_sim and isinstance(paper_sim, PaperSim):
+            self.sim_calc = paper_sim  
         else:
-            self.sim_cal = PaperSim(
+            self.sim_calc = PaperSim(
                 embed_api_key = embed_api_key,
                 embed_model_name = embed_model_name
             )
-    
 
-    async def paper_sim_score(self, nodes_json):
+
+    ####################################################################################
+    # similarity calculation and filter
+    ####################################################################################
+    async def score_paper2paper__sim(self, nodes_json):
         """calculate paper-paper similarity"""
         # valid paper with abstracts
         paper_json_w_abstract = [node for node in nodes_json 
@@ -53,8 +83,7 @@ class PaperRouter:
             )
         return semantic_similar_pool
 
-
-    async def topic_sim_score(self, nodes_json):
+    async def score_paper2topic_sim(self, nodes_json):
         """calculate paper-topic similarity"""
         # valid paper with abstracts
         paper_json_w_abstract = [node for node in nodes_json 
@@ -71,57 +100,149 @@ class PaperRouter:
             )
         return semantic_similar_pool
 
-    def paper_significance_scorer(
+
+    ####################################################################################
+    # statistics calculation and significant paper identify
+    ####################################################################################
+    def gen_nodes_stats(self, paper_graph):
+        """calculate statistics for paper node"""
+        # ---------- 1. Initiate stats  ------------
+        # for paper stats
+        paper_stats = {
+            'id': [],
+            'citationCount': [],
+            'influentialCitationCount': [],
+            'referenceCount': [],
+            'monthlyCitationCount': [],
+            'localCitationCount': [],
+            'localReferenceCount': []
+        }
+
+        # for author stats
+        author_stats = {
+            'paperCount': [],
+            'citationCount': [],
+            'hIndex': [],
+            'localPaperCount': []
+        }
+
+        # iterate paper node to calculate measurements
+        for nid, node_data in paper_graph.nodes(data=True):
+            # ---------- 2. Calculate paper stats  ------------
+            if node_data.get('nodeType') == 'Paper':
+                paper_stats['id'].append(nid)
+                # global measurement
+                pub_dt = node_data.get('publicationDate')
+                paper_cit_cnt = node_data.get('citationCount')
+                paper_stats['citationCount'].append(paper_cit_cnt)
+                paper_stats['influentialCitationCount'].append(node_data.get('influentialCitationCount'))
+                paper_stats['referenceCount'].append(node_data.get('referenceCount'))
+
+                # generated measurement
+                if pub_dt:
+                    try:
+                        tm_to_dt = relativedelta(datetime.now().date(), datetime.strptime(pub_dt, '%Y-%m-%d').date())
+                        mth_to_dt = tm_to_dt.years * 12 + tm_to_dt.months
+                        if paper_cit_cnt is not None and mth_to_dt > 0:
+                            paper_mthly_cit_cnt = paper_cit_cnt / mth_to_dt
+                            paper_stats['monthlyCitationCount'].append(paper_mthly_cit_cnt)
+                    except ValueError:
+                        paper_stats['monthlyCitationCount'].append(None)
+
+                # local measurement
+                predecessors = paper_graph.predecessors(nid)
+                paper_loc_cit_cnt = sum([1 for x in predecessors if paper_graph.nodes[x].get('nodeType') == 'Paper'])
+                paper_stats['localCitationCount'].append(paper_loc_cit_cnt)
+
+                successors = paper_graph.successors(nid)
+                paper_loc_ref_cnt = sum([1 for x in successors if paper_graph.nodes[x].get('nodeType') == 'Paper'])
+                paper_stats['localReferenceCount'].append(paper_loc_ref_cnt)
+
+            # ---------- 3. Calculate author stats  ------------
+            elif node_data.get('nodeType') == 'Author':
+                author_stats['id'].append(nid)
+                # global measurement
+                author_stats['paperCount'].append(node_data.get('paperCount'))
+                author_stats['citationCount'].append(node_data.get('citationCount'))
+                author_stats['hIndex'].append(node_data.get('hIndex'))
+
+                # local measurement
+                successors = paper_graph.successors(nid)
+                author_loc_paper_cnt = sum([1 for x in successors if paper_graph.nodes[x].get('nodeType') == 'Paper'])
+                author_stats['localPaperCount'].append(author_loc_paper_cnt)
+
+        node_stats = {'paper_stats': paper_stats, 'author_stats': author_stats}
+
+        # ---------- 4. generate stats analysis ------------
+        paper_stats_analysis = graph_basic_stats(paper_stats)
+        author_stats_analysis = graph_basic_stats(author_stats)
+        stats_analysis = {'paper_stats_analysis': paper_stats_analysis, 
+                          'author_stats_analysis': author_stats_analysis}
+
+        return node_stats, stats_analysis
+
+    def identify_paper_significant(
             self,
-            paper_id,
-            paper_graph
+            paper_stats,
             ):
-        """identify paper significance"""
-        paper_node = paper_graph.nodes[paper_id]
+        """identify significant paper node"""
+        paper_stats_df = pd.DataFrame(paper_stats)
+        for index, row in paper_stats_df.iterrows():
+            pid = row['id']
+            # rule 1: global citation greater than or equal to 20
+            if row['citationCount'] >= 20:
+                significant_ind = 1
+                info = 'citationCount'
 
-        # basic info
-        pub_dt = paper_node.get('publicationDate')
-        tot_cit_cnt = paper_node.get('citationCount')
-        tot_sig_cit_cnt = paper_node.get('influentialCitationCount')
-        tot_ref_cnt = paper_node.get('referenceCount')
-        
-        # generated info
-        tm_to_dt = relativedelta(datetime.now().date(), datetime.strptime(pub_dt, '%Y-%m-%d').date())  # publish time to date
-        mth_to_dt = tm_to_dt.years * 12 + tm_to_dt.months
-        mth_avg_cit_cnt = tot_cit_cnt / mth_to_dt
+            # rule 2: influential citation greater than or equal to 3
+            elif row['influentialCitationCount'] >= 3:
+                significant_ind = 1
+                info = 'influentialCitationCount'
 
-        # author info:  author -> WRITES -> this paper
-        predecessors = paper_graph.predecessors(paper_id)
-        for nid in predecessors:
-            node_info = paper_graph.nodes[nid]
-            node_type = node_info.get('nodeType')
-            if node_type == 'Author':
-                tot_paper_cnt = node_info.get('paperCount')
-                tot_citation_cnt = node_info.get('citationCount')
-                h_index = node_info.get('hIndex')
+            # rule 3: monthly citation greater than or equal to 5
+            elif row['monthlyCitationCount'] >= 5:
+                significant_ind = 1
+                info = 'monthlyCitationCount'
 
-        # local citation info: other paper -> CITES -> this paper
-        predecessors = paper_graph.predecessors(paper_id)
-        for nid in predecessors:
-            node_info = paper_graph.nodes[nid]
-            node_type = node_info.get('nodeType')
-            if node_type == 'Paper':
-                tot_cit_cnt = node_info.get('citationCount')
-                tot_sig_cit_cnt = node_info.get('influentialCitationCount')
+            # rule 4: local citation greater than or equal to 5
+            elif row['localCitationCount'] >= 5:
+                significant_ind = 1
+                info = 'localCitationCount'
 
-        # local reference info: this paper -> CITES -> other paper
-        successors = paper_graph.successors(paper_id)
-        for nid in successors:
-            node_info = paper_graph.nodes[nid]
-            node_type = node_info.get('nodeType')
-            if node_type == 'Paper':
-                tot_cit_cnt = node_info.get('citationCount')
-                tot_sig_cit_cnt = node_info.get('influentialCitationCount')
+            row['significance'] = significant_ind
+            row['sig_info'] = info
 
+    def identify_author_significant(
+            self,
+            author_stats,
+            ):
+        """identify significant paper node"""
+        author_stats_df = pd.DataFrame(author_stats)
+        for index, row in author_stats_df.iterrows():
+            aid = row['id']
+            # rule 1: h-index greater than or equal to 10
+            if row['hIndex'] >= 10:
+                significant_ind = 1
 
+            # rule 2: average paper ciation greater than or equal to 20
+            elif row['paperCount'] / row['paperCount'] >= 20:
+                significant_ind = 1
+
+            # rule 4: local citation greater than or equal to 5
+            elif row['localPaperCount'] >= 5:
+                significant_ind = 1
+
+            row['significance'] = significant_ind
+
+    def identify_paper_significant_relative(self):
         pass
 
+    def identify_paper_significant_lpa(self):
+        pass
 
+    ####################################################################################
+    # statistics calculation and filter
+    ####################################################################################
     def paper_filter(
             self,
             nodes_json,
@@ -186,8 +307,10 @@ class PaperRouter:
     def cross_ref_discover(self):
         pass
 
+
     def key_author_discover(self):
         pass
+
 
     def paper_graph_pruning(
             self, 

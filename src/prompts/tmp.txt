@@ -3,110 +3,25 @@ You are a sophisticated academic scholar skillful with search engines.
 Given the following paper contexts, you are asked to compose 3-5 search queries help find more relevant literature works.
 
 ## INSTRUCTION
-- Each query shall distinct and non-overlap with each other. All queries together cover main themes in input. 
-- The queries lead to broader, more diversified yet related papers through search results.
-- The queries should be keyword-focused. Utilize operators like "OR", "AND", "-" to improve query if necessary.
+- Queries shall be generated with different emphasis on research questions, methodologies, inherited or related research topics, etc. 
+- Queries are keyword-focused, they would be used to find matches in other papers' title, abstract and context. Restrict the use operators like "OR", "AND" to be as few as possible.
+- Each query shall distinct and non-overlap with each other. They lead to broader, more diversified yet related papers through search results.
 - Give descriptions and extra information on the query, which could help further filter the search results.
 
-Please output query and query descriptions in json format as follows:
-[{"query": "search query", "description": "a detailed description of the topic"}]
-Only one set of queries for all the papers from input.
+Please output in json format the example shows. Only one set of queries for all the papers from input.
 
-## EXAMPLE
+## INPUT
 
 Here is an example:
 ```
-<TITLE> Social media usage heighten political polarization in youth - A quantitative study </TITLE>
-<ABSTRACT>
+<paper> Social media usage heighten political polarization in youth - A quantitative study 
 This study employed a mixed-methods approach to investigate the impact of social media usage on political polarization among young adults in urban areas. 
 Quantitative data was collected through a survey of 500 participants, while qualitative data was gathered via semi-structured interviews with a subset of 25 participants. 
 The findings suggest a correlation between increased exposure to ideologically homogeneous content online and heightened political polarization.
-</ABSTRACT>
+</paper>
 ```
-
-Hypothetical output for this example:
-```json
-[
-    {
-        "query": ""social media" AND ("political polarization" OR "ideological polarization") AND (youth OR "young adults") AND (survey OR quantitative)",
-        "description": "Focuses on quantitative studies examining the relationship between social media use and political polarization specifically among young people. Good for finding similar methodological approaches and comparative studies."
-    },
-    {
-        "query": ""echo chambers" OR "filter bubbles" OR "selective exposure" AND "political attitudes" AND "social media"",
-        "description": "Targets the mechanism of how social media might cause polarization through information filtering and exposure. Useful for theoretical framework and causal explanations."
-    },
-    {
-        "query": ""digital media" AND "political behavior" AND (polarization OR radicalization)",
-        "description": "Broadens the scope to general digital media effects on political behavior while excluding platform-specific studies. Helpful for understanding the wider context of media influence on political attitudes."
-    },
-    {
-        "query": ""political polarization" AND ("social media" OR "online media") AND ('measurement' OR 'quantitative study') ",
-        "description": "Focuses on methodological approaches to measuring political polarization in digital contexts. Valuable for finding advanced measurement techniques and methodological discussions."
-    }
-]
-```
-
-## INPUT
-Now start analyzing the following texts from paper(s).
-
-```
-<TITLE> Qwen2.5 Technical Report </TITLE>
-<ABSTRACT>
-In this report, we introduce Qwen2.5, a comprehensive series of large language models (LLMs) designed to meet diverse needs. Compared to previous iterations, Qwen 2.5 has been significantly improved during both the pre-training and post-training stages. In terms of pre-training, we have scaled the high-quality pre-training datasets from the previous 7 trillion tokens to 18 trillion tokens. This provides a strong foundation for common sense, expert knowledge, and reasoning capabilities. In terms of post-training, we implement intricate supervised finetuning with over 1 million samples, as well as multistage reinforcement learning. Post-training techniques enhance human preference, and notably improve long text generation, structural data analysis, and instruction following. To handle diverse and varied use cases effectively, we present Qwen2.5 LLM series in rich sizes. Open-weight offerings include base and instruction-tuned models, with quantized versions available. In addition, for hosted solutions, the proprietary models currently include two mixture-of-experts (MoE) variants: Qwen2.5-Turbo and Qwen2.5-Plus, both available from Alibaba Cloud Model Studio. Qwen2.5 has demonstrated top-tier performance on a wide range of benchmarks evaluating language understanding, reasoning, mathematics, coding, human preference alignment, etc. Specifically, the open-weight flagship Qwen2.5-72B-Instruct outperforms a number of open and proprietary models and demonstrates competitive performance to the state-of-the-art open-weight model, Llama-3-405B-Instruct, which is around 5 times larger. Qwen2.5-Turbo and Qwen2.5-Plus offer superior cost-effectiveness while performing competitively against GPT-4o-mini and GPT-4o respectively. Additionally, as the foundation, Qwen2.5 models have been instrumental in training specialized models such as Qwen2.5-Math, Qwen2.5-Coder, QwQ, and multimodal models.
-</ABSTRACT>
-```
-
-## OUTPUT
-Please think step-by-step and finally give your answer here:
-
-
-
-
-
-
-
-
-[
-  {
-    "query": "'social media' AND 'political polarization' AND ('youth' OR 'young adults')",
-    "description": "This query focuses on the primary relationship explored in the paper: the link between social media platform usage and the divergence of political viewpoints specifically within younger populations. It seeks studies that quantitatively or qualitatively assess this connection in demographics typically encompassing late teens through twenties."
-  },
-  {
-    "query": "('echo chambers' OR 'filter bubbles' OR 'ideological segregation' OR 'homogeneous content') AND 'social media' AND 'political attitudes'",
-    "description": "This query targets the mechanism mentioned in the abstract – exposure to ideologically uniform content. It searches for literature investigating how curated information environments or selective exposure on social media platforms influence or reinforce users' political beliefs and attitudes, potentially leading to increased polarization across various age groups, but with a focus on the cognitive or behavioral mechanisms."
-  },
-  {
-    "query": "'social media use' AND ('political engagement' OR 'civic participation' OR 'political behavior') AND ('adolescents' OR \"young people\") -polarization",
-    "description": "This query broadens the scope to explore related impacts of social media on the political lives of young people, beyond just polarization. It aims to find research on how social media influences levels of political interest, participation in civic activities (like voting or protesting), or other political behaviors among youth. The exclusion term '-polarization' helps find studies focusing on these alternative outcomes, providing a contrasting or complementary perspective to the core topic."
-  },
-  {
-    "query": "'political polarization' AND 'youth' AND ('survey' OR 'mixed methods' OR 'quantitative study')",
-    "description": "This query focuses on finding studies addressing political polarization in youth that employ similar research methodologies as the input paper (quantitative surveys, mixed methods). This helps identify methodologically comparable research, allowing for comparison of findings, survey instruments, or analytical approaches used to study this specific demographic and topic."
-  }
-]
-
-
-
-
-
-
-
-
-## TASK
-You are an expert at using . 
-Take the following user input and generate 3-5 effective search queries correspondingly that would help find the relevant information. 
-
-## INSTRUACTION
-- 
-
-## INPUT
-1. Social media use and political polarization in young adults
-2. Echo chambers filter bubbles youth political attitudes
-3. Impact of online content exposure on youth political polarization
 
 ## OUTPUT 
-Please output in json format.
+Please output in json format like:
+[{"query":"", "description":""}, {"query":"", "description":""}, ...]
 
-
-"social media" AND "political polarization" AND ("young adults" OR youth)
-"impact social media political views young adults"

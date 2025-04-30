@@ -1,20 +1,20 @@
 query_example = [
-    {
-        "query": "'social media' AND ('political polarization' OR 'ideological polarization') AND ('youth' OR 'young adults')",
-        "description": "Focuses on quantitative studies examining the relationship between social media use and political polarization specifically among young people. Good for finding similar methodological approaches and comparative studies."
-    },
-    {
-        "query": "'echo chambers' OR 'filter bubbles' OR 'selective exposure' AND 'political attitudes' AND 'social media'",
-        "description": "Targets the mechanism of how social media might cause polarization through information filtering and exposure. Useful for theoretical framework and causal explanations."
-    },
-    {
-        "query": "'digital media' AND 'political behavior' OR (polarization OR radicalization)",
-        "description": "Broadens the scope to general digital media effects on political behavior while excluding platform-specific studies. Helpful for understanding the wider context of media influence on political attitudes."
-    },
-    {
-        "query": "'political polarization' AND ('social media' OR 'online media' AND ('measurement' OR 'quantitative study') ",
-        "description": "Focuses on methodological approaches to measuring political polarization in digital contexts. Valuable for finding advanced measurement techniques and methodological discussions."
-    }
+  {
+    "query": "social media political polarization youth influence",
+    "description": "This query targets the core research question, focusing specifically on the impact or influence of social media platforms on the political polarization levels observed among young adults or adolescents. Useful for finding studies measuring both variables in this specific demographic."
+  },
+  {
+    "query": "echo chamber filter bubble political polarization online exposure",
+    "description": "Focusing on the mechanism suggested in the findings (ideologically homogeneous content), this query seeks studies investigating how exposure patterns online, such as echo chambers or filter bubbles, contribute to political polarization across various populations."
+  },
+  {
+    "query": "mixed methods political communication media effects survey interview",
+    "description": "This query emphasizes the methodology employed. It aims to find research within political communication or media effects that utilizes a mixed-methods approach, potentially combining quantitative (survey) and qualitative (interview) data, to study phenomena like polarization or attitude formation. Useful for methodological comparisons."
+  },
+  {
+    "query": "digital media youth civic engagement political attitudes",
+    "description": "This query explores related research topics by broadening the scope. It searches for literature examining the relationship between young people's use of digital media and their broader civic engagement levels or general political attitudes, which may provide context for polarization studies."
+  }
 ]
 
 query_prompt = """## TASK
@@ -22,9 +22,9 @@ You are a sophisticated academic scholar skillful with search engines.
 Given the following paper contexts, you are asked to compose 3-5 search queries help find more relevant literature works.
 
 ## INSTRUCTION
-- Each query shall distinct and non-overlap with each other. All queries together cover main themes in input. 
-- The queries lead to broader, more diversified yet related papers through search results.
-- The queries should be keyword-focused. Utilize operators like "OR", "AND", "-" to improve query if necessary.
+- Generate queries with different emphasis on research questions, methodologies, inherited or related research topics, etc. 
+- Design queries as keyword-focused, they would be used to find matches in other papers' title, abstract and context. Restrict to use operators like "OR", "AND" as few as possible.
+- Make each query shall distinct and non-overlap with each other. They lead to broader, more diversified yet related papers through search results.
 - Give descriptions and extra information on the query, which could help further filter the search results.
 
 Please output in json format the example shows. Only one set of queries for all the papers from input.

@@ -49,9 +49,9 @@ class PaperSim:
                 continue
             
             # append topic and description for batch embedding
-            topic = node['properties'].get('topic')
+            topic = node['properties'].get('name', '')
             description = node['properties'].get('description', '')
-            if topic is not None and description is not None:
+            if description is not None:
                 texts.append(f"{topic} {description}")
                 ids.append(node_id)
 
@@ -266,9 +266,8 @@ class PaperSim:
 
         # --- 4. Process similarity matrix ---
         semantic_similar_pool = process_p2t_sim_data(
-            paper_nodes_json = paper_nodes_json,
-            paper_ids_1 = ids_1,
-            paper_ids_2 = ids_2,
+            paper_ids = ids_1,
+            topic_ids = ids_2,
             sim_matrix = sim_matrix, 
             similarity_threshold = similarity_threshold
         )
